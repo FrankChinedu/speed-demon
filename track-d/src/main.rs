@@ -23,11 +23,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
-/// An edge is one word, `(head + 1) << 32 | weight`, so an all-zero row is empty and
-/// rows can come from zeroed memory with no fill pass. Node ids are below n < 2^32 - 2.
-const EMPTY: u64 = 0;
+/// An edge is one word, `head << 32 | weight`. Node ids are below n < 2^32 - 2.
+const EMPTY: u64 = u64::MAX;
 /// In a row's last slot, `SPILL << 32 | k`: the node's remaining edges are list k.
-const SPILL: u64 = u32::MAX as u64;
+const SPILL: u64 = u32::MAX as u64 - 1;
 
 /// Up to four edges of one node, in one aligned half cache line. Atomic so the build
 /// threads can place edges without unsafe code; relaxed loads and stores compile to
@@ -49,13 +48,16 @@ impl Adjacency {
     /// an overflow list and a SPILL marker in its last slot.
     fn with_degrees(degree: &[AtomicU32]) -> Adjacency {
         let mut spill_first = vec![0u32];
-        let rows: Vec<Row> = zeroed(degree.len());
-        for (row, d) in rows.iter().zip(degree.iter().map(|d| d.load(Relaxed))) {
-            if d > 4 {
-                row.0[3].store(SPILL << 32 | (spill_first.len() as u64 - 1), Relaxed);
-                spill_first.push(spill_first.last().unwrap() + d - 3);
-            }
-        }
+        let rows = (degree.iter().map(|d| d.load(Relaxed)))
+            .map(|d| {
+                let row = Row(std::array::from_fn(|_| AtomicU64::new(EMPTY)));
+                if d > 4 {
+                    row.0[3].store(SPILL << 32 | (spill_first.len() as u64 - 1), Relaxed);
+                    spill_first.push(spill_first.last().unwrap() + d - 3);
+                }
+                row
+            })
+            .collect();
         let spill_edges = (0..*spill_first.last().unwrap())
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -97,10 +99,10 @@ impl Adjacency {
                         [self.spill_first[k] as usize..self.spill_first[k + 1] as usize];
                     list.iter()
                         .map(|e| e.load(Relaxed))
-                        .for_each(|e| f((e >> 32) as u32 - 1, e as u32));
+                        .for_each(|e| f((e >> 32) as u32, e as u32));
                     return;
                 }
-                v => f(v as u32 - 1, e as u32),
+                v => f(v as u32, e as u32),
             }
         }
     }
@@ -117,29 +119,6 @@ impl Adjacency {
         let _ = u;
     }
 }
-
-/// `n` zeroed values from a zeroed allocation: no pass writes them first, and the
-/// kernel zeroes each page when a build thread first touches it, in parallel.
-fn zeroed<T: Zeroable>(n: usize) -> Vec<T> {
-    let layout = std::alloc::Layout::array::<T>(n).expect("allocation size");
-    if layout.size() == 0 {
-        return Vec::new();
-    }
-    // SAFETY: `Zeroable` types are valid as all-zero bytes; the allocation has the
-    // layout of `n` values of T and is handed to the Vec that will free it.
-    unsafe {
-        let ptr = std::alloc::alloc_zeroed(layout) as *mut T;
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        Vec::from_raw_parts(ptr, n, n)
-    }
-}
-
-/// Types whose all-zero bit pattern is a valid value.
-trait Zeroable {}
-impl Zeroable for AtomicU32 {}
-impl Zeroable for Row {}
 
 struct Graph {
     out: Adjacency,
@@ -200,7 +179,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
     let chunks = split_lines(&text[header_end..], threads * 4);
 
     // Pass 1: out- and in-degrees.
-    let (out_degree, in_degree): (Vec<AtomicU32>, Vec<AtomicU32>) = (zeroed(n), zeroed(n));
+    let out_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    let in_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
     for_each_chunk(&chunks, threads, |chunk| {
         for_each_line(chunk, |u, v, _| {
             out_degree[u as usize].fetch_add(1, Relaxed);
@@ -219,8 +199,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         for_each_line(chunk, |u, v, w| {
             let out_slot = out_degree[u as usize].fetch_sub(1, Relaxed) as usize - 1;
             let into_slot = in_degree[v as usize].fetch_sub(1, Relaxed) as usize - 1;
-            out.place(u, out_slot, (v as u64 + 1) << 32 | w as u64);
-            into.place(v, into_slot, (u as u64 + 1) << 32 | w as u64);
+            out.place(u, out_slot, (v as u64) << 32 | w as u64);
+            into.place(v, into_slot, (u as u64) << 32 | w as u64);
         });
     });
     Graph { out, into }
