@@ -93,6 +93,16 @@ struct Plan {
     /// (first term, second term) -> the phrases that start with that pair.
     starts: FxMap<u64, Vec<u32>>,
     starts_phrase: Vec<bool>,
+    /// One bit per hashed (first, second) pair of every phrase: most adjacent pairs
+    /// in the corpus fail this cached test and never reach the `starts` map.
+    pair_filter: Vec<u64>,
+}
+
+const PAIR_FILTER_BITS: u32 = 20;
+
+#[inline]
+fn pair_bit(a: u32, b: u32) -> usize {
+    (pair(a, b).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - PAIR_FILTER_BITS)) as usize
 }
 
 /// Posting lists of the BOOL terms for one chunk of documents: term b's documents
@@ -111,12 +121,15 @@ impl ChunkIndex {
 }
 
 fn main() {
+    mmap::small_pages();
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let plan = plan(mmap::map(&data.join("queries.txt")));
     let docs = mmap::map(&data.join("docs.txt"));
-    let threads = thread::available_parallelism().map_or(1, |n| n.get()).min(12);
+    let threads = thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(12);
     // About 8 MB per chunk: ~8,000 documents, well inside the 16-bit offsets.
     let chunks = split_lines(docs, (threads * 2).max(docs.len() >> 23));
 
@@ -130,6 +143,7 @@ fn main() {
                     let mut done = Vec::new();
                     let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
+                    let mut mask = Vec::new();
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         // Each document's distinct BOOL terms, back to back, and how many each has.
                         let mut terms: Vec<u32> = Vec::with_capacity(chunk.len() / 12);
@@ -139,10 +153,14 @@ fn main() {
                         for_each_doc(chunk, |doc, text| {
                             base.get_or_insert(doc);
                             ids.clear();
-                            tokenize(text, &plan.terms, |t| ids.push(t));
+                            tokenize(text, &plan.terms, &mut mask, |t| ids.push(t));
                             let before = terms.len();
                             for &t in &ids {
-                                let b = if t == NONE { NONE } else { plan.bool_index[t as usize] };
+                                let b = if t == NONE {
+                                    NONE
+                                } else {
+                                    plan.bool_index[t as usize]
+                                };
                                 if b != NONE && last[b as usize] != doc {
                                     last[b as usize] = doc;
                                     terms.push(b);
@@ -152,18 +170,31 @@ fn main() {
                             match_phrases(plan, &ids, doc, &mut matches);
                         });
                         let base = base.unwrap_or(0);
-                        assert!(per_doc.len() <= 1 << 16, "chunk too large for 16-bit offsets");
-                        done.push((base as usize, counting_sort(base, &terms, &per_doc, plan.n_bool), matches));
+                        assert!(
+                            per_doc.len() <= 1 << 16,
+                            "chunk too large for 16-bit offsets"
+                        );
+                        done.push((
+                            base as usize,
+                            counting_sort(base, &terms, &per_doc, plan.n_bool),
+                            matches,
+                        ));
                     }
                     done
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
     });
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
-    let mut matches: Vec<(u32, u32)> = indexed.iter_mut().flat_map(|(_, _, m)| std::mem::take(m)).collect();
+    let mut matches: Vec<(u32, u32)> = indexed
+        .iter_mut()
+        .flat_map(|(_, _, m)| std::mem::take(m))
+        .collect();
     let index: Vec<ChunkIndex> = indexed.into_iter().map(|(_, ci, _)| ci).collect();
     // A phrase can match one document at several positions; count the document once.
     matches.sort_unstable();
@@ -191,14 +222,17 @@ fn main() {
                             break;
                         }
                         let mut buf = Vec::with_capacity(BLOCK * 40);
-                        for q in &plan.queries[k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len())] {
+                        for q in &plan.queries[k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len())]
+                        {
                             let mut result = Summary::default();
                             match q {
                                 Query::Phrase(p) => phrase_docs(*p).for_each(|d| result.add(d)),
                                 Query::Bool(first, rest) => {
                                     for ci in index {
                                         if rest.is_empty() {
-                                            ci.list(*first).iter().for_each(|&d| result.add(ci.base + d as u32));
+                                            ci.list(*first)
+                                                .iter()
+                                                .for_each(|&d| result.add(ci.base + d as u32));
                                             continue;
                                         }
                                         a.clear();
@@ -219,7 +253,10 @@ fn main() {
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
     });
     blocks.sort_unstable_by_key(|&(k, _)| k);
 
@@ -249,7 +286,11 @@ fn counting_sort(base: u32, terms: &[u32], per_doc: &[u32], n_bool: usize) -> Ch
         }
         at += n as usize;
     }
-    ChunkIndex { base, offsets, docs }
+    ChunkIndex {
+        base,
+        offsets,
+        docs,
+    }
 }
 
 /// Parses queries.txt and assigns term ids.
@@ -279,7 +320,10 @@ fn plan(text: &'static [u8]) -> Plan {
             raw_bool.push((first, ops));
             queries.push(Query::Bool(0, Vec::new()));
         } else {
-            let inner = line.strip_prefix(b"PHRASE \"").and_then(|r| r.strip_suffix(b"\"")).expect("bad query");
+            let inner = line
+                .strip_prefix(b"PHRASE \"")
+                .and_then(|r| r.strip_suffix(b"\""))
+                .expect("bad query");
             phrases.push(inner.split(|&b| b == b' ').map(&mut id).collect());
             queries.push(Query::Phrase(phrases.len() - 1));
         }
@@ -299,17 +343,35 @@ fn plan(text: &'static [u8]) -> Plan {
     for q in queries.iter_mut() {
         if let Query::Bool(..) = q {
             let (first, ops) = raw_bool.next().unwrap();
-            *q = Query::Bool(dense(first), ops.into_iter().map(|(op, t)| (op, dense(t))).collect());
+            *q = Query::Bool(
+                dense(first),
+                ops.into_iter().map(|(op, t)| (op, dense(t))).collect(),
+            );
         }
     }
 
     let mut starts: FxMap<u64, Vec<u32>> = FxMap::default();
     let mut starts_phrase = vec![false; ids.len()];
+    let mut pair_filter = vec![0u64; 1 << (PAIR_FILTER_BITS - 6)];
     for (p, terms) in phrases.iter().enumerate() {
-        starts.entry(pair(terms[0], terms[1])).or_default().push(p as u32);
+        starts
+            .entry(pair(terms[0], terms[1]))
+            .or_default()
+            .push(p as u32);
         starts_phrase[terms[0] as usize] = true;
+        let bit = pair_bit(terms[0], terms[1]);
+        pair_filter[bit / 64] |= 1 << (bit % 64);
     }
-    Plan { terms: Terms::new(&ids), bool_index, n_bool: n_bool as usize, queries, phrases, starts, starts_phrase }
+    Plan {
+        terms: Terms::new(&ids),
+        bool_index,
+        n_bool: n_bool as usize,
+        queries,
+        phrases,
+        starts,
+        starts_phrase,
+        pair_filter,
+    }
 }
 
 fn pair(a: u32, b: u32) -> u64 {
@@ -321,6 +383,10 @@ fn match_phrases(plan: &Plan, ids: &[u32], doc: u32, matches: &mut Vec<(u32, u32
     for i in 0..ids.len().saturating_sub(1) {
         let (a, b) = (ids[i], ids[i + 1]);
         if a == NONE || b == NONE || !plan.starts_phrase[a as usize] {
+            continue;
+        }
+        let bit = pair_bit(a, b);
+        if plan.pair_filter[bit / 64] >> (bit % 64) & 1 == 0 {
             continue;
         }
         if let Some(candidates) = plan.starts.get(&pair(a, b)) {
@@ -338,9 +404,17 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
     let mut p = 0;
     while p < chunk.len() {
         let line = &chunk[p..];
-        let tab = line.iter().position(|&b| b == b'\t').expect("TAB after the id");
-        let eol = line[tab..].iter().position(|&b| b == b'\n').map_or(line.len(), |e| tab + e);
-        let doc = line[..tab].iter().fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
+        let tab = line
+            .iter()
+            .position(|&b| b == b'\t')
+            .expect("TAB after the id");
+        let eol = line[tab..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(line.len(), |e| tab + e);
+        let doc = line[..tab]
+            .iter()
+            .fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
         f(doc, &line[tab + 1..eol]);
         p += eol + 1;
     }
@@ -362,7 +436,11 @@ struct Terms {
 impl Terms {
     fn new(ids: &FxMap<&'static [u8], u32>) -> Terms {
         let cap = (ids.len() * 2).next_power_of_two().max(16);
-        let mut t = Terms { mask: cap - 1, slots: vec![0; cap], keys: vec![[0; 4]; ids.len()] };
+        let mut t = Terms {
+            mask: cap - 1,
+            slots: vec![0; cap],
+            keys: vec![[0; 4]; ids.len()],
+        };
         for (&word, &id) in ids {
             let mut bytes = [0u8; MAX_TERM];
             bytes[..word.len()].copy_from_slice(word);
@@ -403,35 +481,122 @@ fn to_key(bytes: &[u8; MAX_TERM]) -> Key {
 
 #[inline]
 fn hash(k: &Key) -> u64 {
-    let h = (k[0].wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ k[1].rotate_left(23).wrapping_mul(0xc2b2_ae3d_27d4_eb4f))
+    let h = (k[0].wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ k[1].rotate_left(23).wrapping_mul(0xc2b2_ae3d_27d4_eb4f))
         ^ (k[2] ^ k[3].rotate_left(41)).wrapping_mul(0x1656_67b1_9e37_79f9);
     h ^ h >> 29
 }
 
 /// Calls `f` with the term id (or NONE) of every token, in order.
+///
+/// A token is a maximal run of `[A-Za-z0-9]`. First every byte is classified into a
+/// bitmask (64 bytes per word), then tokens are walked with trailing-zero counts, so
+/// the only unpredictable branch is once per token rather than once per byte.
 #[inline]
-fn tokenize(text: &[u8], terms: &Terms, mut f: impl FnMut(u32)) {
+fn tokenize(text: &[u8], terms: &Terms, mask: &mut Vec<u64>, mut f: impl FnMut(u32)) {
+    token_mask(text, mask);
     let mut i = 0;
-    while i < text.len() {
-        if CLASS[text[i] as usize] == 0 {
-            i += 1;
-            continue;
-        }
-        let mut buf = [0u8; MAX_TERM];
-        let mut len = 0;
-        while i < text.len() {
-            let c = CLASS[text[i] as usize];
-            if c == 0 {
-                break;
-            }
-            if len < MAX_TERM {
-                buf[len] = c;
-            }
-            len += 1;
-            i += 1;
-        }
-        f(if len <= MAX_TERM { terms.get(&to_key(&buf)) } else { NONE });
+    while let Some(start) = next_bit(mask, i, 0) {
+        let end = next_bit(mask, start, !0).unwrap_or(text.len());
+        f(if end - start <= MAX_TERM {
+            terms.get(&key_at(text, start, end - start))
+        } else {
+            NONE
+        });
+        i = end;
     }
+}
+
+/// The first position at or after `i` whose mask bit is set (`flip == 0`) or clear
+/// (`flip == !0`). Bits past the text are clear.
+#[inline]
+fn next_bit(mask: &[u64], i: usize, flip: u64) -> Option<usize> {
+    let mut w = i / 64;
+    let mut m = (*mask.get(w)? ^ flip) & (!0u64 << (i % 64));
+    while m == 0 {
+        w += 1;
+        m = *mask.get(w)? ^ flip;
+    }
+    Some(w * 64 + m.trailing_zeros() as usize)
+}
+
+/// The lowercased, zero-padded key of the token `text[start..start + len]`. OR-ing
+/// 0x20 lowercases ASCII letters and leaves digits alone; the length mask clears the
+/// separator bytes that follow the token.
+#[inline]
+fn key_at(text: &[u8], start: usize, len: usize) -> Key {
+    std::array::from_fn(|w| {
+        let from = start + w * 8;
+        if w * 8 >= len {
+            return 0;
+        }
+        let word = match text.get(from..from + 8) {
+            Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+            None => {
+                let mut b = [0u8; 8];
+                b[..text.len() - from].copy_from_slice(&text[from..]);
+                u64::from_le_bytes(b)
+            }
+        };
+        let keep = len - w * 8;
+        let word = word | 0x2020_2020_2020_2020;
+        if keep >= 8 {
+            word
+        } else {
+            word & ((1u64 << (keep * 8)) - 1)
+        }
+    })
+}
+
+/// One bit per byte of `text`, set for the token bytes `[A-Za-z0-9]`.
+fn token_mask(text: &[u8], mask: &mut Vec<u64>) {
+    mask.clear();
+    let mut blocks = text.chunks_exact(64);
+    for block in &mut blocks {
+        mask.push(block_mask(block.try_into().unwrap()));
+    }
+    let tail = blocks.remainder();
+    if !tail.is_empty() {
+        mask.push(
+            tail.iter()
+                .enumerate()
+                .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i),
+        );
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+fn block_mask(block: &[u8; 64]) -> u64 {
+    use std::arch::x86_64::*;
+    // SAFETY: AVX2 is enabled at compile time (target-cpu=x86-64-v3), and both loads
+    // read 32 bytes inside the 64-byte block.
+    unsafe {
+        let half = |p: *const u8| {
+            let v = _mm256_loadu_si256(p as *const __m256i);
+            let lower = _mm256_or_si256(v, _mm256_set1_epi8(0x20));
+            // Signed compares: bytes >= 0x80 are negative and fail both ranges.
+            let alpha = _mm256_and_si256(
+                _mm256_cmpgt_epi8(lower, _mm256_set1_epi8(b'a' as i8 - 1)),
+                _mm256_cmpgt_epi8(_mm256_set1_epi8(b'z' as i8 + 1), lower),
+            );
+            let digit = _mm256_and_si256(
+                _mm256_cmpgt_epi8(v, _mm256_set1_epi8(b'0' as i8 - 1)),
+                _mm256_cmpgt_epi8(_mm256_set1_epi8(b'9' as i8 + 1), v),
+            );
+            _mm256_movemask_epi8(_mm256_or_si256(alpha, digit)) as u32 as u64
+        };
+        half(block.as_ptr()) | half(block.as_ptr().add(32)) << 32
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+#[inline]
+fn block_mask(block: &[u8; 64]) -> u64 {
+    block
+        .iter()
+        .enumerate()
+        .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i)
 }
 
 /// `out = a op b` on ascending, duplicate-free lists.
@@ -552,7 +717,10 @@ fn split_lines(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
         let mut end = data.len();
         if k < n {
             let guess = (data.len() * k / n).max(start);
-            end = data[guess..].iter().position(|&b| b == b'\n').map_or(data.len(), |p| guess + p + 1);
+            end = data[guess..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(data.len(), |p| guess + p + 1);
         }
         chunks.push(&data[start..end]);
         start = end;
