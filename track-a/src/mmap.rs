@@ -24,7 +24,16 @@ pub fn map(path: &Path) -> &'static [u8] {
     }
     // SAFETY: a fresh read-only private mapping of `len` bytes of an open file. The
     // input is read-only for the whole run, so the bytes never change under us.
-    let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0) };
+    let ptr = unsafe {
+        mmap(
+            std::ptr::null_mut(),
+            len,
+            PROT_READ,
+            MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        )
+    };
     assert!(ptr as isize != -1, "mmap {} failed", path.display());
     // SAFETY: the mapping is valid for `len` bytes and lives until the process exits.
     unsafe { std::slice::from_raw_parts(ptr, len) }
