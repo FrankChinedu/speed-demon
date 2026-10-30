@@ -59,7 +59,11 @@ impl Adjacency {
                     let work = &work;
                     s.spawn(move || {
                         let mut done = Vec::new();
-                        while let Some((b, rows)) = work.lock().unwrap().next() {
+                        loop {
+                            // Take the lock only to pick a bucket, not while filling it.
+                            let Some((b, rows)) = work.lock().unwrap().next() else {
+                                break;
+                            };
                             done.push((b, fill_bucket(b, rows, &edges[starts[b]..starts[b + 1]])));
                         }
                         done
@@ -461,45 +465,44 @@ impl RadixHeap {
     }
 }
 
-/// An empty key in a distance map.
-const NO_KEY: u32 = u32::MAX;
+/// A distance-map entry is one word, `node << 43 | distance`, so a probe touches one
+/// cache line. Node ids fit 21 bits (asserted at load); distances in these graphs
+/// stay far below 2^43 (asserted on every insert).
+const DIST_BITS: u32 = 43;
+const DIST_MASK: u64 = (1 << DIST_BITS) - 1;
+const NO_ENTRY: u64 = u64::MAX;
 
 /// Open-addressing map from node to tentative distance. Missing means infinity.
 struct DistMap {
-    keys: Vec<u32>,
-    vals: Vec<u64>,
+    slots: Vec<u64>,
     /// Slots filled since the last clear, so clearing costs what the query used.
     used: Vec<u32>,
 }
 
 impl Default for DistMap {
     fn default() -> Self {
-        DistMap::with_capacity(1024)
+        DistMap {
+            slots: vec![NO_ENTRY; 1024],
+            used: Vec::new(),
+        }
     }
 }
 
 impl DistMap {
-    fn with_capacity(cap: usize) -> DistMap {
-        DistMap {
-            keys: vec![NO_KEY; cap],
-            vals: vec![0; cap],
-            used: Vec::new(),
-        }
-    }
-
     /// Empties the map, keeping its capacity warm for the next large query.
     fn clear(&mut self) {
         for &i in &self.used {
-            self.keys[i as usize] = NO_KEY;
+            self.slots[i as usize] = NO_ENTRY;
         }
         self.used.clear();
     }
 
+    /// The slot holding `k`, or the empty slot where it would go.
     #[inline]
     fn slot(&self, k: u32) -> usize {
-        let mask = self.keys.len() - 1;
+        let mask = self.slots.len() - 1;
         let mut i = (k.wrapping_mul(0x9e37_79b9) >> 7) as usize & mask;
-        while self.keys[i] != NO_KEY && self.keys[i] != k {
+        while self.slots[i] != NO_ENTRY && (self.slots[i] >> DIST_BITS) as u32 != k {
             i = (i + 1) & mask;
         }
         i
@@ -507,41 +510,39 @@ impl DistMap {
 
     #[inline]
     fn get(&self, k: u32) -> u64 {
-        let i = self.slot(k);
-        if self.keys[i] == k {
-            self.vals[i]
-        } else {
-            u64::MAX
+        match self.slots[self.slot(k)] {
+            NO_ENTRY => u64::MAX,
+            e => e & DIST_MASK,
         }
     }
 
     /// Lowers k's distance to `d` if that is an improvement; returns whether it was.
     #[inline]
     fn improve(&mut self, k: u32, d: u64) -> bool {
+        assert!(d < DIST_MASK, "distance beyond 2^43");
         let i = self.slot(k);
-        if self.keys[i] == k {
-            if d < self.vals[i] {
-                self.vals[i] = d;
-                return true;
+        let e = self.slots[i];
+        if e != NO_ENTRY {
+            if d >= e & DIST_MASK {
+                return false;
             }
-            return false;
+        } else {
+            self.used.push(i as u32);
         }
-        self.keys[i] = k;
-        self.vals[i] = d;
-        self.used.push(i as u32);
-        if self.used.len() * 2 > self.keys.len() {
+        self.slots[i] = (k as u64) << DIST_BITS | d;
+        if self.used.len() * 2 > self.slots.len() {
             self.grow();
         }
         true
     }
 
     fn grow(&mut self) {
-        let old = std::mem::replace(self, DistMap::with_capacity(self.keys.len() * 2));
-        for &j in &old.used {
-            let (k, v) = (old.keys[j as usize], old.vals[j as usize]);
-            let i = self.slot(k);
-            self.keys[i] = k;
-            self.vals[i] = v;
+        let cap = self.slots.len() * 2;
+        let old = std::mem::replace(&mut self.slots, vec![NO_ENTRY; cap]);
+        for j in std::mem::take(&mut self.used) {
+            let e = old[j as usize];
+            let i = self.slot((e >> DIST_BITS) as u32);
+            self.slots[i] = e;
             self.used.push(i as u32);
         }
     }
