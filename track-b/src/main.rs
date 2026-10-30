@@ -90,19 +90,12 @@ struct Plan {
     n_bool: usize,
     queries: Vec<Query>,
     phrases: Vec<Vec<u32>>,
-    /// (first term, second term) -> the phrases that start with that pair.
-    starts: FxMap<u64, Vec<u32>>,
-    starts_phrase: Vec<bool>,
-    /// One bit per hashed (first, second) pair of every phrase: most adjacent pairs
-    /// in the corpus fail this cached test and never reach the `starts` map.
-    pair_filter: Vec<u64>,
-}
-
-const PAIR_FILTER_BITS: u32 = 20;
-
-#[inline]
-fn pair_bit(a: u32, b: u32) -> usize {
-    (pair(a, b).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - PAIR_FILTER_BITS)) as usize
+    /// Each phrase is checked only where its key term occurs: the phrase's term used
+    /// by the fewest queries, a proxy for the rarest in the corpus (almost every
+    /// phrase is built around a rare anchor). Term t's phrases, with the key's
+    /// position inside each, are `keyed[key_first[t]..key_first[t + 1]]`.
+    key_first: Vec<u32>,
+    keyed: Vec<(u32, u32)>,
 }
 
 /// Posting lists of the BOOL terms for one chunk of documents: term b's documents
@@ -339,6 +332,10 @@ fn plan(text: &'static [u8]) -> Plan {
         }
         bool_index[t as usize]
     };
+    let raw_terms: Vec<u32> = raw_bool
+        .iter()
+        .flat_map(|(f, ops)| std::iter::once(*f).chain(ops.iter().map(|&(_, t)| t)))
+        .collect();
     let mut raw_bool = raw_bool.into_iter();
     for q in queries.iter_mut() {
         if let Query::Bool(..) = q {
@@ -350,17 +347,37 @@ fn plan(text: &'static [u8]) -> Plan {
         }
     }
 
-    let mut starts: FxMap<u64, Vec<u32>> = FxMap::default();
-    let mut starts_phrase = vec![false; ids.len()];
-    let mut pair_filter = vec![0u64; 1 << (PAIR_FILTER_BITS - 6)];
-    for (p, terms) in phrases.iter().enumerate() {
-        starts
-            .entry(pair(terms[0], terms[1]))
-            .or_default()
-            .push(p as u32);
-        starts_phrase[terms[0] as usize] = true;
-        let bit = pair_bit(terms[0], terms[1]);
-        pair_filter[bit / 64] |= 1 << (bit % 64);
+    // Query frequency of every term, then each phrase's key: its least used term.
+    let mut uses = vec![0u32; ids.len()];
+    for q in &queries {
+        if let Query::Phrase(p) = q {
+            phrases[*p].iter().for_each(|&t| uses[t as usize] += 1);
+        }
+    }
+    for t in raw_terms {
+        uses[t as usize] += 1;
+    }
+    let keys: Vec<(u32, u32, u32)> = phrases
+        .iter()
+        .enumerate()
+        .map(|(p, terms)| {
+            let at = (0..terms.len())
+                .min_by_key(|&j| uses[terms[j] as usize])
+                .unwrap();
+            (terms[at], p as u32, at as u32)
+        })
+        .collect();
+    let mut key_first = vec![0u32; ids.len() + 1];
+    keys.iter()
+        .for_each(|&(t, ..)| key_first[t as usize + 1] += 1);
+    for t in 0..ids.len() {
+        key_first[t + 1] += key_first[t];
+    }
+    let mut cursor = key_first.clone();
+    let mut keyed = vec![(0, 0); keys.len()];
+    for &(t, p, at) in &keys {
+        keyed[cursor[t as usize] as usize] = (p, at);
+        cursor[t as usize] += 1;
     }
     Plan {
         terms: Terms::new(&ids),
@@ -368,30 +385,23 @@ fn plan(text: &'static [u8]) -> Plan {
         n_bool: n_bool as usize,
         queries,
         phrases,
-        starts,
-        starts_phrase,
-        pair_filter,
+        key_first,
+        keyed,
     }
 }
 
-fn pair(a: u32, b: u32) -> u64 {
-    (a as u64) << 32 | b as u64
-}
-
-/// Records (phrase, doc) for every phrase found in the document's token ids.
+/// Records (phrase, doc) for every phrase found in the document's token ids, checking
+/// each phrase only where its key term occurs.
 fn match_phrases(plan: &Plan, ids: &[u32], doc: u32, matches: &mut Vec<(u32, u32)>) {
-    for i in 0..ids.len().saturating_sub(1) {
-        let (a, b) = (ids[i], ids[i + 1]);
-        if a == NONE || b == NONE || !plan.starts_phrase[a as usize] {
+    for (i, &t) in ids.iter().enumerate() {
+        if t == NONE {
             continue;
         }
-        let bit = pair_bit(a, b);
-        if plan.pair_filter[bit / 64] >> (bit % 64) & 1 == 0 {
-            continue;
-        }
-        if let Some(candidates) = plan.starts.get(&pair(a, b)) {
-            for &p in candidates {
-                if ids[i..].starts_with(&plan.phrases[p as usize]) {
+        let (lo, hi) = (plan.key_first[t as usize], plan.key_first[t as usize + 1]);
+        for &(p, at) in &plan.keyed[lo as usize..hi as usize] {
+            let terms = &plan.phrases[p as usize];
+            if let Some(start) = i.checked_sub(at as usize) {
+                if ids[start..].starts_with(terms) {
                     matches.push((p, doc));
                 }
             }
