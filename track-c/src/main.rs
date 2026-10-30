@@ -301,11 +301,11 @@ fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names,
         batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen);
+            std::hint::black_box((&batch, names, seen)); // TIMING PROBE: no interning
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen);
+    std::hint::black_box((&batch, n)); // TIMING PROBE
 }
 
 /// Records per interning batch.
