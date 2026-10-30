@@ -18,37 +18,15 @@
 mod mmap;
 
 use std::fs::File;
-use std::hash::Hasher;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::thread;
 
-/// FxHash: one multiply per 8 bytes. Names and codes are short and not adversarial.
-#[derive(Default)]
-struct Fx(u64);
-
-impl Hasher for Fx {
-    fn write(&mut self, bytes: &[u8]) {
-        const K: u64 = 0x517c_c1b7_2722_0a95;
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            self.0 =
-                (self.0.rotate_left(5) ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(K);
-        }
-        let mut tail = [0u8; 8];
-        tail[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
-        self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(K);
-    }
-
-    fn write_u64(&mut self, v: u64) {
-        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
-    }
-
-    fn finish(&self) -> u64 {
-        self.0 ^ self.0 >> 29
-    }
+/// FxHash step: one multiply per 8-byte word. Names are short and not adversarial.
+fn mix(h: u64, w: u64) -> u64 {
+    (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -408,12 +386,9 @@ impl Names {
 
     /// The dense id of the name whose raw field bytes are `raw`.
     fn hash(c: &[u8], start: usize, len: usize) -> u64 {
-        let mut h = Fx::default();
-        for k in 0..len.div_ceil(8) {
-            h.write_u64(name_word(c, start, len, k));
-        }
-        h.write_u64(len as u64);
-        h.finish()
+        let h = (0..len.div_ceil(8)).fold(0, |h, k| mix(h, name_word(c, start, len, k)));
+        let h = mix(h, len as u64);
+        h ^ h >> 29
     }
 
     /// Starts loading the slot a name with hash `h` probes first.
