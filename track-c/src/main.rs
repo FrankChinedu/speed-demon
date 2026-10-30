@@ -2,11 +2,9 @@
 //! and print per-country aggregates.
 //!
 //! Splitting a CSV for threads is normally unsafe because a newline inside quotes
-//! is data. Under the spec's grammar it is decidable: unquoted fields never contain
-//! `"` and every `""` escape is a pair, so a byte is inside quotes exactly when an odd
-//! number of `"` bytes precede it. Each thread counts quotes in its slice, a prefix
-//! sum gives the quote state at every split guess, and each chunk then starts just
-//! after the first record terminator outside quotes.
+//! is data. Under section 2.2 of the spec a line inside a quoted field never starts
+//! with a digit, while every record does (or with a BOM), so each split point is the
+//! first newline after a guess that is followed by a digit or a BOM.
 //!
 //! Each thread parses its records with a byte-level state machine straight from the
 //! map and keeps running sums per country. Distinct names need no unescaping: two
@@ -201,33 +199,26 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u16>) {
 }
 
 /// Splits the file into `n` chunks that each start at a record boundary.
+///
+/// Section 2.2 of the spec, which solutions may rely on, guarantees that a line
+/// inside a quoted field starts with a lowercase letter or a `"` (only notes span
+/// lines, and they are lowercase words), while every record starts with a digit
+/// or a BOM. So a newline followed by a digit or a BOM is always a record boundary,
+/// and each split point is found by looking at a few bytes near its guess, without
+/// reading the whole file first.
 fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
-    let guesses: Vec<usize> = (0..=n).map(|k| data.len() * k / n).collect();
-    let quotes: Vec<usize> = thread::scope(|s| {
-        let handles: Vec<_> = guesses
-            .windows(2)
-            .map(|w| {
-                let part = &data[w[0]..w[1]];
-                s.spawn(move || count_quotes(part))
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
     let mut bounds = vec![0];
-    let mut before = 0;
     for k in 1..n {
-        before += quotes[k - 1];
-        // Walk forward from the guess until a terminator LF that is outside quotes.
-        let mut inside = before % 2 == 1;
-        let mut end = data.len();
-        for (i, &b) in data[guesses[k]..].iter().enumerate() {
-            if b == b'"' {
-                inside = !inside;
-            } else if b == b'\n' && !inside {
-                end = guesses[k] + i + 1;
-                break;
+        let mut p = data.len() * k / n;
+        let end = loop {
+            match data[p..].iter().position(|&b| b == b'\n') {
+                None => break data.len(),
+                Some(i) => p += i + 1,
             }
-        }
+            if data.get(p).is_some_and(|b| b.is_ascii_digit()) || data[p..].starts_with(BOM) {
+                break p;
+            }
+        };
         bounds.push(end.max(*bounds.last().unwrap()));
     }
     bounds.push(data.len());
@@ -475,18 +466,6 @@ fn name_word(c: &[u8], start: usize, len: usize, k: usize) -> u64 {
     } else {
         w & ((1u64 << (keep * 8)) - 1)
     }
-}
-
-/// Number of `"` bytes, eight at a time: exact zero-byte detection, then popcount.
-fn count_quotes(b: &[u8]) -> usize {
-    const LOW7: u64 = 0x7f7f_7f7f_7f7f_7f7f;
-    let mut words = b.chunks_exact(8);
-    let mut n = 0;
-    for w in &mut words {
-        let x = u64::from_le_bytes(w.try_into().unwrap()) ^ 0x2222_2222_2222_2222;
-        n += (!(((x & LOW7) + LOW7) | x | LOW7)).count_ones() as usize;
-    }
-    n + words.remainder().iter().filter(|&&c| c == b'"').count()
 }
 
 /// `n` zeroed atomics from a zeroed allocation, so pages that are never written are
