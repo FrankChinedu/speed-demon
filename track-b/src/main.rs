@@ -16,37 +16,11 @@
 
 mod mmap;
 
-use std::collections::HashMap;
 use std::fs::File;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::thread;
-
-/// FxHash: one multiply per word. Keys are query words and packed term pairs.
-#[derive(Default)]
-struct Fx(u64);
-
-impl Hasher for Fx {
-    fn write(&mut self, bytes: &[u8]) {
-        for c in bytes.chunks(8) {
-            let mut word = [0u8; 8];
-            word[..c.len()].copy_from_slice(c);
-            self.write_u64(u64::from_le_bytes(word));
-        }
-    }
-
-    fn write_u64(&mut self, v: u64) {
-        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
 /// A token that no query uses, or a term that is not in any BOOL query.
 const NONE: u32 = u32::MAX;
@@ -443,10 +417,16 @@ fn counting_sort(base: u32, terms: &[u32], per_doc: &[u32], n_bool: usize) -> Ch
 
 /// Parses queries.txt and assigns term ids.
 fn plan(text: &'static [u8]) -> Plan {
-    let mut ids: FxMap<&'static [u8], u32> = FxMap::default();
-    let mut id = |w: &'static [u8]| {
-        let next = ids.len() as u32;
-        *ids.entry(w).or_insert(next)
+    // Query words go straight into the token table, keyed exactly as the tokenizer
+    // will key corpus tokens (terms are already lowercase).
+    let mut terms = Terms::default();
+    let mut id = |w: &[u8]| {
+        assert!(w.len() <= MAX_TERM, "query term longer than 32 bytes");
+        terms.insert(key_at(
+            text,
+            w.as_ptr() as usize - text.as_ptr() as usize,
+            w.len(),
+        ))
     };
     let mut raw_bool: Vec<(u32, Vec<(Op, u32)>)> = Vec::new();
     let mut queries = Vec::new();
@@ -478,7 +458,8 @@ fn plan(text: &'static [u8]) -> Plan {
     }
 
     // BOOL terms get dense indices so each chunk's offset table only covers them.
-    let mut bool_index = vec![NONE; ids.len()];
+    let n_terms = terms.keys.len();
+    let mut bool_index = vec![NONE; n_terms];
     let mut n_bool = 0;
     let mut dense = |t: u32| {
         if bool_index[t as usize] == NONE {
@@ -503,7 +484,7 @@ fn plan(text: &'static [u8]) -> Plan {
     }
 
     // Query frequency of every term, then each phrase's key: its least used term.
-    let mut uses = vec![0u32; ids.len()];
+    let mut uses = vec![0u32; n_terms];
     for q in &queries {
         if let Query::Phrase(p) = q {
             phrases[*p].iter().for_each(|&t| uses[t as usize] += 1);
@@ -522,10 +503,10 @@ fn plan(text: &'static [u8]) -> Plan {
             (terms[at], p as u32, at as u32)
         })
         .collect();
-    let mut key_first = vec![0u32; ids.len() + 1];
+    let mut key_first = vec![0u32; n_terms + 1];
     keys.iter()
         .for_each(|&(t, ..)| key_first[t as usize + 1] += 1);
-    for t in 0..ids.len() {
+    for t in 0..n_terms {
         key_first[t + 1] += key_first[t];
     }
     let mut cursor = key_first.clone();
@@ -535,8 +516,8 @@ fn plan(text: &'static [u8]) -> Plan {
         cursor[t as usize] += 1;
     }
     Plan {
-        terms: Terms::new(&ids),
-        info: (0..ids.len())
+        terms,
+        info: (0..n_terms)
             .map(|t| [bool_index[t], key_first[t], key_first[t + 1], 0])
             .collect(),
         n_bool: n_bool as usize,
@@ -605,6 +586,17 @@ struct Terms {
     filter: Vec<u64>,
 }
 
+impl Default for Terms {
+    fn default() -> Self {
+        Terms {
+            mask: (1 << 16) - 1,
+            slots: vec![0; 1 << 16],
+            keys: Vec::new(),
+            filter: vec![0; 1 << (FILTER_BITS - 6)],
+        }
+    }
+}
+
 const FILTER_BITS: u32 = 20;
 
 #[inline]
@@ -616,30 +608,38 @@ fn filter_bits(h: u64) -> (usize, usize) {
 }
 
 impl Terms {
-    fn new(ids: &FxMap<&'static [u8], u32>) -> Terms {
-        let cap = (ids.len() * 2).next_power_of_two().max(16);
-        let mut t = Terms {
-            mask: cap - 1,
-            slots: vec![0; cap],
-            keys: vec![[0; 4]; ids.len()],
-            filter: vec![0; 1 << (FILTER_BITS - 6)],
-        };
-        for (&word, &id) in ids {
-            let mut bytes = [0u8; MAX_TERM];
-            bytes[..word.len()].copy_from_slice(word);
-            let key = to_key(&bytes);
-            let h = hash(&key);
-            let mut i = h as usize & t.mask;
-            while t.slots[i] != 0 {
-                i = (i + 1) & t.mask;
-            }
-            t.slots[i] = (h >> 32) << 32 | (id as u64 + 1);
-            t.keys[id as usize] = key;
-            let (a, b) = filter_bits(h);
-            t.filter[a / 64] |= 1 << (a % 64);
-            t.filter[b / 64] |= 1 << (b % 64);
+    /// The id of `key`, adding it if it is new. Grows at half full.
+    fn insert(&mut self, key: Key) -> u32 {
+        let found = self.get(&key);
+        if found != NONE {
+            return found;
         }
-        t
+        if (self.keys.len() + 1) * 2 > self.slots.len() {
+            let old = std::mem::take(&mut self.keys);
+            *self = Terms {
+                mask: self.slots.len() * 2 - 1,
+                slots: vec![0; self.slots.len() * 2],
+                ..Terms::default()
+            };
+            for k in old {
+                self.add(k);
+            }
+        }
+        self.add(key)
+    }
+
+    fn add(&mut self, key: Key) -> u32 {
+        let (h, id) = (hash(&key), self.keys.len() as u32);
+        let mut i = h as usize & self.mask;
+        while self.slots[i] != 0 {
+            i = (i + 1) & self.mask;
+        }
+        self.slots[i] = (h >> 32) << 32 | (id as u64 + 1);
+        self.keys.push(key);
+        let (a, b) = filter_bits(h);
+        self.filter[a / 64] |= 1 << (a % 64);
+        self.filter[b / 64] |= 1 << (b % 64);
+        id
     }
 
     #[inline]
@@ -662,11 +662,6 @@ impl Terms {
             i = (i + 1) & self.mask;
         }
     }
-}
-
-#[inline]
-fn to_key(bytes: &[u8; MAX_TERM]) -> Key {
-    std::array::from_fn(|w| u64::from_le_bytes(bytes[w * 8..w * 8 + 8].try_into().unwrap()))
 }
 
 #[inline]
