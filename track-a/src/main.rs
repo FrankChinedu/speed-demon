@@ -23,6 +23,8 @@ use std::thread;
 const EP_BITS: u32 = 16;
 const HOUR_MASK: u32 = 0x7fff;
 const ERR_BIT: u32 = 1 << 31;
+/// The spec fixes the span for every seed: the 72 hours from 2026-10-30T18:00Z.
+const HOURS: usize = 72;
 
 /// Records are kept in blocks of this many, so the scatter can free each block as
 /// soon as it is consumed and the records and the sorted copy never both peak.
@@ -32,6 +34,10 @@ const BLOCK: usize = 1 << 16;
 struct Parsed {
     endpoints: Vec<&'static [u8]>,
     records: Vec<Vec<(u32, u32)>>,
+    /// Lines per (local endpoint, hour), counted while parsing, at `id * HOURS + hour`.
+    /// Atomic only so that the prefix-sum workers can turn them into cursors in place;
+    /// the parsing thread itself uses plain loads and stores.
+    counts: Vec<AtomicU32>,
     hour_min: u32,
     hour_max: u32,
 }
@@ -46,13 +52,13 @@ fn main() {
         .map_or(1, |n| n.get())
         .min(12);
     // Hours are stored relative to 2026-10-30T00:00Z; every timestamp is in the 72 h after 18:00.
-    let base = days_from_civil(2026, 10, 30) * 24;
+    let base = days_from_civil(2026, 10, 30) * 24 + 18;
 
     // Many small chunks handed out on demand, so a slow core never holds up the
     // rest. Each thread still produces one result, keeping per-thread state small.
     let chunks = split_lines(input, (input.len() >> 21).max(threads));
     let next = AtomicUsize::new(0);
-    let mut parts: Vec<Parsed> = thread::scope(|s| {
+    let parts: Vec<Parsed> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 let (chunks, next) = (&chunks, &next);
@@ -79,54 +85,55 @@ fn main() {
     };
     assert!(groups < u32::MAX as usize);
 
-    // Rewrite each record's key to its global group id, counting per thread.
-    let errors: Vec<AtomicU32> = (0..groups).map(|_| AtomicU32::new(0)).collect();
-    let mut cursors: Vec<Vec<u32>> = thread::scope(|s| {
-        let (names, errors) = (&names, &errors);
-        let handles: Vec<_> = parts
-            .iter_mut()
-            .map(|p| {
-                s.spawn(move || {
-                    let rank: Vec<usize> = p
-                        .endpoints
-                        .iter()
-                        .map(|e| names.binary_search(e).unwrap())
-                        .collect();
-                    let mut count = vec![0u32; groups];
-                    for rec in p.records.iter_mut().flatten() {
-                        let key = rec.0;
-                        let hour = ((key >> EP_BITS) & HOUR_MASK) - hour_min;
-                        let g = hour as usize * n_ep + rank[(key & ((1 << EP_BITS) - 1)) as usize];
-                        if key & ERR_BIT != 0 {
-                            errors[g].fetch_add(1, Relaxed);
-                        }
-                        count[g] += 1;
-                        rec.0 = g as u32;
-                    }
-                    count
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    // Each thread's local endpoint ids, ranked globally, and the reverse map. The count
+    // of group g in thread t then sits in t's own table at `slot(t, g)`.
+    let ranks: Vec<Vec<usize>> = parts
+        .iter()
+        .map(|p| {
+            p.endpoints
+                .iter()
+                .map(|e| names.binary_search(e).unwrap())
+                .collect()
+        })
+        .collect();
+    let local: Vec<Vec<u32>> = ranks
+        .iter()
+        .map(|r| {
+            let mut v = vec![u32::MAX; n_ep];
+            r.iter().enumerate().for_each(|(id, &g)| v[g] = id as u32);
+            v
+        })
+        .collect();
+    let slot = |t: usize, g: usize| {
+        let id = local[t][g % n_ep];
+        (id != u32::MAX).then(|| id as usize * HOURS + hour_min as usize + g / n_ep)
+    };
 
-    // Prefix sums: `starts[g]` is group g's first slot; each thread's counts become its
-    // private write cursors inside every group, so the scatter needs no synchronisation.
-    // In parallel over ranges of groups: each range's total first, then each range
-    // turns its counts into cursors from its own starting offset.
+    // Prefix sums: `starts[g]` is group g's first slot, and every thread's counts turn
+    // in place into its private write cursors inside every group, so the scatter
+    // needs no synchronisation. In parallel over ranges of groups: each range's total
+    // first, then each range assigns cursors from its own starting offset.
     let ranges: Vec<(usize, usize)> = (0..threads)
         .map(|k| (groups * k / threads, groups * (k + 1) / threads))
         .collect();
+    let per_range = |(g0, g1): (usize, usize), f: &(dyn Fn(usize, usize) + Sync)| {
+        for g in g0..g1 {
+            (0..parts.len())
+                .filter_map(|t| Some((t, slot(t, g)?)))
+                .for_each(|(t, i)| f(t, i));
+        }
+    };
     let range_totals: Vec<u32> = thread::scope(|s| {
         let handles: Vec<_> = ranges
             .iter()
-            .map(|&(g0, g1)| {
-                let cursors = &cursors;
+            .map(|&r| {
+                let (parts, per_range) = (&parts, &per_range);
                 s.spawn(move || {
-                    cursors
-                        .iter()
-                        .map(|c| c[g0..g1].iter().sum::<u32>())
-                        .sum::<u32>()
+                    let total = AtomicU32::new(0);
+                    per_range(r, &|t, i| {
+                        total.fetch_add(parts[t].counts[i].load(Relaxed), Relaxed);
+                    });
+                    total.into_inner()
                 })
             })
             .collect();
@@ -135,31 +142,19 @@ fn main() {
     let mut starts = vec![0u32; groups + 1];
     let total: u32 = range_totals.iter().sum();
     starts[groups] = total;
-    let mut pieces: Vec<Vec<&mut [u32]>> = ranges.iter().map(|_| Vec::new()).collect();
-    for c in cursors
-        .iter_mut()
-        .map(Vec::as_mut_slice)
-        .chain([&mut starts[..groups]])
-    {
-        let mut rest = c;
-        for (piece, &(g0, g1)) in pieces.iter_mut().zip(&ranges) {
-            let (mine, tail) = rest.split_at_mut(g1 - g0);
-            piece.push(mine);
-            rest = tail;
-        }
-    }
     thread::scope(|s| {
-        let mut offset = 0u32;
-        for (mut piece, &range_total) in pieces.into_iter().zip(&range_totals) {
-            let mut at = offset;
+        let (mut rest, mut offset) = (&mut starts[..groups], 0u32);
+        for (&(g0, g1), &range_total) in ranges.iter().zip(&range_totals) {
+            let (mine, tail) = rest.split_at_mut(g1 - g0);
+            rest = tail;
+            let (mut at, parts, slot) = (offset, &parts, &slot);
             offset += range_total;
             s.spawn(move || {
-                let starts = piece.pop().unwrap();
-                for (i, start) in starts.iter_mut().enumerate() {
+                for (g, start) in (g0..g1).zip(mine) {
                     *start = at;
-                    for c in piece.iter_mut() {
-                        let n = c[i];
-                        c[i] = at;
+                    for (t, i) in (0..parts.len()).filter_map(|t| Some((t, slot(t, g)?))) {
+                        let n = parts[t].counts[i].load(Relaxed);
+                        parts[t].counts[i].store(at, Relaxed);
                         at += n;
                     }
                 }
@@ -168,20 +163,29 @@ fn main() {
     });
 
     // Zeroed memory: pages are charged only as the scatter first writes them.
+    let errors: Vec<AtomicU32> = (0..groups).map(|_| AtomicU32::new(0)).collect();
     let mut latencies = vec![0u32; total as usize];
     let dst = Scatter(latencies.as_mut_ptr());
     thread::scope(|s| {
-        for (p, mut cur) in parts.into_iter().zip(cursors) {
-            let dst = &dst;
+        for (p, rank) in parts.into_iter().zip(&ranks) {
+            let (dst, errors) = (&dst, &errors);
             s.spawn(move || {
                 // Each block is dropped as soon as it is scattered.
-                for (g, latency) in p.records.into_iter().flatten() {
-                    let at = &mut cur[g as usize];
+                for (key, latency) in p.records.into_iter().flatten() {
+                    let (id, hour) = (
+                        (key & ((1 << EP_BITS) - 1)) as usize,
+                        ((key >> EP_BITS) & HOUR_MASK) as usize,
+                    );
+                    let cur = &p.counts[id * HOURS + hour];
+                    let at = cur.load(Relaxed);
                     // SAFETY: the cursors give every (thread, group) pair a disjoint range
                     // inside `latencies`, sized by the counts above, so writes never alias
                     // and never go out of bounds.
-                    unsafe { dst.put(*at as usize, latency) };
-                    *at += 1;
+                    unsafe { dst.put(at as usize, latency) };
+                    cur.store(at + 1, Relaxed);
+                    if key & ERR_BIT != 0 {
+                        errors[(hour - hour_min as usize) * n_ep + rank[id]].fetch_add(1, Relaxed);
+                    }
                 }
             });
         }
@@ -337,6 +341,7 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
     let mut table = Endpoints::default();
     let mut records = Vec::new();
     let mut block = Vec::with_capacity(BLOCK);
+    let mut counts = Vec::new();
     let (mut hour_min, mut hour_max) = (u32::MAX, 0);
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
     while let Some(chunk) = next_chunk() {
@@ -352,7 +357,7 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
             }
             let hour = date_hours + num(&line[11..13]) - base;
             assert!(
-                (0..=HOUR_MASK as i64).contains(&hour),
+                (0..HOURS as i64).contains(&hour),
                 "timestamp outside the supported span"
             );
             let hour = hour as u32;
@@ -380,6 +385,11 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
             i += j + 1;
 
             assert!(id < 1 << EP_BITS, "too many distinct endpoints");
+            let slot = id as usize * HOURS + hour as usize;
+            if slot >= counts.len() {
+                counts.resize_with((id as usize + 1) * HOURS, || AtomicU32::new(0));
+            }
+            counts[slot].store(counts[slot].load(Relaxed) + 1, Relaxed);
             hour_min = hour_min.min(hour);
             hour_max = hour_max.max(hour);
             if block.len() == BLOCK {
@@ -395,6 +405,7 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
     Parsed {
         endpoints: table.names,
         records,
+        counts,
         hour_min,
         hour_max,
     }
