@@ -233,7 +233,7 @@ fn main() {
                     let mut done = Vec::new();
                     let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
-                    let mut mask = Vec::new();
+                    let mut scratch = Scratch::default();
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         // Each document's distinct BOOL terms, back to back, and how many each has.
                         let mut terms: Vec<u32> = Vec::with_capacity(chunk.len() / 12);
@@ -246,22 +246,22 @@ fn main() {
                             ids.clear();
                             keys.clear();
                             let before = terms.len();
-                            // One pass: record the token, its BOOL posting (once per
-                            // document) and whether a phrase is keyed on it, all from
-                            // the term's single 16-byte info record.
-                            tokenize(text, &plan.terms, &mut mask, |t| {
-                                if t != NONE {
-                                    let [b, key_lo, key_hi, _] = plan.info[t as usize];
-                                    if b != NONE && last[b as usize] != doc {
-                                        last[b as usize] = doc;
-                                        terms.push(b);
-                                    }
-                                    if key_lo != key_hi {
-                                        keys.push((ids.len() as u32, key_lo, key_hi));
-                                    }
+                            tokenize(text, &plan.terms, &mut scratch, &mut ids);
+                            ids.iter()
+                                .filter(|&&t| t != NONE)
+                                .for_each(|&t| prefetch(&plan.info[t as usize]));
+                            // Each token's BOOL posting (once per document) and whether a
+                            // phrase is keyed on it, from the term's 16-byte info record.
+                            for (i, &t) in ids.iter().enumerate().filter(|&(_, &t)| t != NONE) {
+                                let [b, key_lo, key_hi, _] = plan.info[t as usize];
+                                if b != NONE && last[b as usize] != doc {
+                                    last[b as usize] = doc;
+                                    terms.push(b);
                                 }
-                                ids.push(t);
-                            });
+                                if key_lo != key_hi {
+                                    keys.push((i as u32, key_lo, key_hi));
+                                }
+                            }
                             per_doc.push((terms.len() - before) as u32);
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
@@ -645,10 +645,20 @@ impl Terms {
     #[inline]
     fn get(&self, key: &Key) -> u32 {
         let h = hash(key);
-        let (a, b) = filter_bits(h);
-        if self.filter[a / 64] >> (a % 64) & self.filter[b / 64] >> (b % 64) & 1 == 0 {
+        if self.filtered_out(h) {
             return NONE;
         }
+        self.probe(key, h)
+    }
+
+    #[inline]
+    fn filtered_out(&self, h: u64) -> bool {
+        let (a, b) = filter_bits(h);
+        self.filter[a / 64] >> (a % 64) & self.filter[b / 64] >> (b % 64) & 1 == 0
+    }
+
+    #[inline]
+    fn probe(&self, key: &Key, h: u64) -> u32 {
         let mut i = h as usize & self.mask;
         loop {
             let s = self.slots[i];
@@ -672,24 +682,63 @@ fn hash(k: &Key) -> u64 {
     h ^ h >> 29
 }
 
-/// Calls `f` with the term id (or NONE) of every token, in order.
+/// Fills `ids` with the term id (or NONE) of every token of `text`, in order.
 ///
 /// A token is a maximal run of `[A-Za-z0-9]`. First every byte is classified into a
 /// bitmask (64 bytes per word), then tokens are walked with trailing-zero counts, so
 /// the only unpredictable branch is once per token rather than once per byte.
-#[inline]
-fn tokenize(text: &[u8], terms: &Terms, mask: &mut Vec<u64>, mut f: impl FnMut(u32)) {
-    token_mask(text, mask);
+///
+/// The term table does not fit in L2, so the lookups for a whole document go in
+/// stages: key, hash and slot prefetch for every token, then the probes. The misses
+/// of one stage overlap instead of each token waiting for its own.
+fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, ids: &mut Vec<u32>) {
+    token_mask(text, &mut scratch.mask);
+    scratch.tokens.clear();
     let mut i = 0;
-    while let Some(start) = next_bit(mask, i, 0) {
-        let end = next_bit(mask, start, !0).unwrap_or(text.len());
-        f(if end - start <= MAX_TERM {
-            terms.get(&key_at(text, start, end - start))
-        } else {
-            NONE
-        });
+    while let Some(start) = next_bit(&scratch.mask, i, 0) {
+        let end = next_bit(&scratch.mask, start, !0).unwrap_or(text.len());
+        let (key, mut h) = ([0; 4], 0);
+        if end - start <= MAX_TERM {
+            let key = key_at(text, start, end - start);
+            h = hash(&key);
+            if !terms.filtered_out(h) {
+                prefetch(&terms.slots[h as usize & terms.mask]);
+                scratch.tokens.push((key, h));
+                i = end;
+                continue;
+            }
+        }
+        scratch.tokens.push((key, h)); // h == 0 never reaches the table below
         i = end;
     }
+    ids.clear();
+    ids.extend(scratch.tokens.iter().map(|(key, h)| {
+        if *h == 0 || terms.filtered_out(*h) {
+            NONE
+        } else {
+            terms.probe(key, *h)
+        }
+    }));
+}
+
+/// Per-thread buffers for `tokenize`.
+#[derive(Default)]
+struct Scratch {
+    mask: Vec<u64>,
+    tokens: Vec<(Key, u64)>,
+}
+
+/// Starts loading the cache line holding `r`. A hint only: it never faults.
+#[inline]
+fn prefetch<T>(r: &T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never faults and `r` is a valid reference anyway.
+    unsafe {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        _mm_prefetch::<_MM_HINT_T0>(r as *const T as *const i8);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = r;
 }
 
 /// The first position at or after `i` whose mask bit is set (`flip == 0`) or clear
