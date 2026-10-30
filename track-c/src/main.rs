@@ -21,6 +21,7 @@ use std::fs::File;
 use std::hash::Hasher;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::thread;
 
@@ -41,6 +42,10 @@ impl Hasher for Fx {
         self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(K);
     }
 
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
     fn finish(&self) -> u64 {
         self.0 ^ self.0 >> 29
     }
@@ -50,10 +55,9 @@ const BOM: &[u8] = b"\xEF\xBB\xBF";
 const NO_REGION: u16 = u16::MAX;
 /// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
 const NAME_SLOTS: usize = 1 << 19;
-/// A (country, name id) pair packs into a u32 as `country << ID_BITS | id`. Pairs
-/// that do not fit (never, for the spec's 241 groups and 100,000 names) go to an
-/// overflow list, so the count stays exact regardless.
-const ID_BITS: u32 = 24;
+/// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
+/// Rarer ids beyond it go to an overflow list, so the count stays exact regardless.
+const MAX_IDS: usize = 1 << 17;
 /// Arena words for distinct names: about 3 MB is used; only touched pages are charged.
 const ARENA_WORDS: usize = 8 << 20;
 
@@ -104,76 +108,50 @@ fn main() {
     let groups = codes.len() + 1; // the last group is _UNMATCHED
 
     let names = Names::new(ARENA_WORDS.min(records.len() / 4 + 64));
+    let bits = zeroed_atomics(groups * MAX_IDS / 64);
+    let overflow = Mutex::new(Vec::new());
+    let seen = Seen {
+        bits: &bits,
+        overflow: &overflow,
+    };
     // Many chunks handed out on demand, so a slow core never holds up the rest.
     let chunks = split_records(records, threads * 8);
     let next = AtomicUsize::new(0);
-    let (aggs, pair_lists, mut overflow) = thread::scope(|s| {
+    let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (region, names, chunks, next) = (&region, &names, &chunks, &next);
+                let (region, names, seen, chunks, next) = (&region, &names, &seen, &chunks, &next);
                 s.spawn(move || {
                     let mut aggs = vec![Agg::EMPTY; groups];
-                    let mut seen = Seen::default();
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, region, &mut aggs, names, &mut seen);
+                        parse(chunk, first, region, &mut aggs, names, seen);
                     }
-                    (aggs, seen)
+                    aggs
                 })
             })
             .collect();
-        let (mut total, mut lists, mut overflow) =
-            (vec![Agg::EMPTY; groups], Vec::new(), Vec::new());
+        let mut total = vec![Agg::EMPTY; groups];
         for h in handles {
-            let (aggs, seen) = h.join().unwrap();
-            for (a, o) in total.iter_mut().zip(&aggs) {
+            for (a, o) in total.iter_mut().zip(&h.join().unwrap()) {
                 a.merge(o);
             }
-            lists.push(seen.pairs);
-            overflow.extend(seen.overflow);
         }
-        (total, lists, overflow)
+        total
     });
+    let mut overflow = overflow.into_inner().unwrap();
     overflow.sort_unstable();
     overflow.dedup();
-
-    // Distinct names per country. Each thread owns a range of countries and builds
-    // their bitsets alone from every thread's pairs: no shared cache line is written
-    // by two cores, which is what made a shared atomic bitset scale poorly.
-    let words = (names.next_id.load(Relaxed) as usize).div_ceil(64);
-    let per = groups.div_ceil(threads);
-    let distinct: Vec<u32> = thread::scope(|s| {
-        let handles: Vec<_> = (0..groups)
-            .step_by(per)
-            .map(|g0| {
-                let (g1, pair_lists, overflow) = ((g0 + per).min(groups), &pair_lists, &overflow);
-                s.spawn(move || {
-                    let mut bits = vec![0u64; (g1 - g0) * words];
-                    for &p in pair_lists.iter().flatten() {
-                        let (g, id) =
-                            ((p >> ID_BITS) as usize, (p & ((1 << ID_BITS) - 1)) as usize);
-                        if (g0..g1).contains(&g) {
-                            bits[(g - g0) * words + id / 64] |= 1 << (id % 64);
-                        }
-                    }
-                    (g0..g1)
-                        .map(|g| {
-                            let set: u32 = bits[(g - g0) * words..][..words]
-                                .iter()
-                                .map(|w| w.count_ones())
-                                .sum();
-                            set + overflow.iter().filter(|&&(og, _)| og == g).count() as u32
-                        })
-                        .collect::<Vec<u32>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect()
-    });
-    drop(pair_lists);
+    let words = (names.next_id.load(Relaxed) as usize)
+        .min(MAX_IDS)
+        .div_ceil(64);
+    let distinct = |g: usize| {
+        let set: u32 = bits[g * MAX_IDS / 64..][..words]
+            .iter()
+            .map(|w| w.load(Relaxed).count_ones())
+            .sum();
+        set + overflow.iter().filter(|&&(og, _)| og == g).count() as u32
+    };
 
     // Country codes are [A-Z]{3}, all below `_`, so _UNMATCHED stays last.
     let mut order: Vec<usize> = (0..codes.len()).collect();
@@ -191,7 +169,7 @@ fn main() {
         } else {
             b"_UNMATCHED"
         });
-        let distinct = distinct[g];
+        let distinct = distinct(g);
         for (v, money) in [
             (a.count as i64, false),
             (a.id_sum as i64, false),
@@ -279,25 +257,38 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 }
 
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
-/// One thread's (country, name id) pairs, deduplicated later.
-#[derive(Default)]
-struct Seen {
-    pairs: Vec<u32>,
-    overflow: Vec<(usize, u32)>,
+/// Where each (country, name id) pair is recorded: one bit per pair, shared by all
+/// threads, so its memory does not grow with the number of threads.
+struct Seen<'a> {
+    bits: &'a [AtomicU64],
+    overflow: &'a Mutex<Vec<(usize, u32)>>,
 }
 
-impl Seen {
+impl Seen<'_> {
     #[inline]
-    fn insert(&mut self, g: usize, id: u32) {
-        if g < 1 << (32 - ID_BITS) && id < 1 << ID_BITS {
-            self.pairs.push((g as u32) << ID_BITS | id);
+    fn prefetch(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            prefetch(&self.bits[(g * MAX_IDS + id as usize) / 64]);
+        }
+    }
+
+    #[inline]
+    fn insert(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            let bit = g * MAX_IDS + id as usize;
+            // Skip the atomic write, and the cache-line transfer it forces, when the
+            // pair is already recorded.
+            let word = &self.bits[bit / 64];
+            if word.load(Relaxed) & 1 << (bit % 64) == 0 {
+                word.fetch_or(1 << (bit % 64), Relaxed);
+            }
         } else {
-            self.overflow.push((g, id));
+            self.overflow.lock().unwrap().push((g, id));
         }
     }
 }
 
-fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &mut Seen) {
+fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
     let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
@@ -351,21 +342,27 @@ fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names,
 /// Records per interning batch.
 const BATCH: usize = 32;
 
-/// Interns a batch of (country, name start, name end) and records each pair. Every
-/// lookup is a likely cache miss into the shared table, so they go in passes: hash
-/// and prefetch every slot, then prefetch every arena entry, then resolve the ids.
-/// The misses of one pass overlap instead of each record waiting for its own.
-fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &mut Seen) {
+/// Interns a batch of (country, name start, name end) and marks each pair seen. Every
+/// lookup is a likely cache miss into the shared tables, so they go in passes: hash
+/// and prefetch every slot, then prefetch every arena entry, then resolve the ids and
+/// prefetch their bitset words, then set the bits. The misses of one pass overlap
+/// instead of each record waiting for its own.
+fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
-        *h = Names::hash(&c[start..end]);
+        *h = Names::hash(c, start, end - start);
         names.prefetch_slot(*h);
     }
     for &h in &hashes[..batch.len()] {
         names.prefetch_entry(h);
     }
-    for (&h, &(g, start, end)) in hashes.iter().zip(batch) {
-        seen.insert(g, names.id(&c[start..end], h));
+    let mut ids = [0u32; BATCH];
+    for ((id, &h), &(g, start, end)) in ids.iter_mut().zip(&hashes).zip(batch) {
+        *id = names.id(c, start, end - start, h);
+        seen.prefetch(g, *id);
+    }
+    for (&id, &(g, ..)) in ids.iter().zip(batch) {
+        seen.insert(g, id);
     }
 }
 
@@ -410,9 +407,12 @@ impl Names {
     }
 
     /// The dense id of the name whose raw field bytes are `raw`.
-    fn hash(raw: &[u8]) -> u64 {
+    fn hash(c: &[u8], start: usize, len: usize) -> u64 {
         let mut h = Fx::default();
-        h.write(raw);
+        for k in 0..len.div_ceil(8) {
+            h.write_u64(name_word(c, start, len, k));
+        }
+        h.write_u64(len as u64);
         h.finish()
     }
 
@@ -432,46 +432,48 @@ impl Names {
     }
 
     /// The dense id of the name whose raw field bytes are `raw` and hash is `h`.
-    fn id(&self, raw: &[u8], h: u64) -> u32 {
+    /// The dense id of the name `c[start..start + len]`, whose hash is `h`.
+    fn id(&self, c: &[u8], start: usize, len: usize, h: u64) -> u32 {
         let tag = (h >> 48) | 1; // never 0, so a filled slot is never 0
         let mut i = h as usize & (NAME_SLOTS - 1);
         let mut mine = None;
         loop {
             let s = self.slots[i].load(Acquire);
             if s == 0 {
-                let entry = *mine.get_or_insert_with(|| self.store(raw, tag));
+                let entry = *mine.get_or_insert_with(|| self.store(c, start, len, tag));
                 match self.slots[i].compare_exchange(0, entry, AcqRel, Acquire) {
                     Ok(_) => return self.id_at(entry),
                     Err(_) => continue, // lost the race: look at what was published
                 }
             }
-            if s & 0xffff == tag && self.equals(s, raw) {
+            if s & 0xffff == tag && self.equals(s, c, start, len) {
                 return self.id_at(s);
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
     }
 
-    fn store(&self, raw: &[u8], tag: u64) -> u64 {
-        assert!(raw.len() < 1 << 16, "name too long");
-        let words = 1 + raw.len().div_ceil(8);
+    fn store(&self, c: &[u8], start: usize, len: usize, tag: u64) -> u64 {
+        assert!(len < 1 << 16, "name too long");
+        let words = 1 + len.div_ceil(8);
         let off = self.used.fetch_add(words, Relaxed);
         assert!(
             off + words <= self.arena.len() && off < 1 << 32,
             "name arena full"
         );
         let id = self.next_id.fetch_add(1, Relaxed);
-        self.arena[off].store(id as u64 | (raw.len() as u64) << 32, Relaxed);
+        self.arena[off].store(id as u64 | (len as u64) << 32, Relaxed);
         for k in 0..words - 1 {
-            self.arena[off + 1 + k].store(word(raw, k), Relaxed);
+            self.arena[off + 1 + k].store(name_word(c, start, len, k), Relaxed);
         }
-        (off as u64) << 32 | (raw.len() as u64) << 16 | tag
+        (off as u64) << 32 | (len as u64) << 16 | tag
     }
 
-    fn equals(&self, s: u64, raw: &[u8]) -> bool {
-        let (off, len) = ((s >> 32) as usize, (s >> 16 & 0xffff) as usize);
-        len == raw.len()
-            && (0..len.div_ceil(8)).all(|k| self.arena[off + 1 + k].load(Relaxed) == word(raw, k))
+    fn equals(&self, s: u64, c: &[u8], start: usize, len: usize) -> bool {
+        let off = (s >> 32) as usize;
+        (s >> 16 & 0xffff) as usize == len
+            && (0..len.div_ceil(8))
+                .all(|k| self.arena[off + 1 + k].load(Relaxed) == name_word(c, start, len, k))
     }
 
     fn id_at(&self, s: u64) -> u32 {
@@ -479,16 +481,24 @@ impl Names {
     }
 }
 
-/// Word `k` of `raw`, zero-padded past its end.
+/// Word `k` of the name `c[start..start + len]`, zero-padded past its end. The name is
+/// always followed by more of the record, so a full 8-byte load from the input plus
+/// a mask replaces a variable-length copy (a `memcpy` call) almost every time.
 #[inline]
-fn word(raw: &[u8], k: usize) -> u64 {
-    match raw.get(k * 8..k * 8 + 8) {
+fn name_word(c: &[u8], start: usize, len: usize, k: usize) -> u64 {
+    let (at, keep) = (start + k * 8, (len - k * 8).min(8));
+    let w = match c.get(at..at + 8) {
         Some(w) => u64::from_le_bytes(w.try_into().unwrap()),
         None => {
             let mut w = [0u8; 8];
-            w[..raw.len() - k * 8].copy_from_slice(&raw[k * 8..]);
+            w[..keep].copy_from_slice(&c[at..at + keep]);
             u64::from_le_bytes(w)
         }
+    };
+    if keep == 8 {
+        w
+    } else {
+        w & ((1u64 << (keep * 8)) - 1)
     }
 }
 
