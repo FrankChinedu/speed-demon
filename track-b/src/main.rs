@@ -234,9 +234,11 @@ fn main() {
                     let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
                     let mut scratch = Scratch::default();
+                    // Each document's distinct BOOL terms, back to back (as 16-bit indices:
+                    // there are at most 65,536 BOOL terms), reused chunk after chunk.
+                    let mut terms: Vec<u16> = Vec::new();
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
-                        // Each document's distinct BOOL terms, back to back, and how many each has.
-                        let mut terms: Vec<u32> = Vec::with_capacity(chunk.len() / 12);
+                        terms.clear();
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
                         let mut per_doc: Vec<u32> = Vec::new();
                         let mut matches = Vec::new();
@@ -256,7 +258,7 @@ fn main() {
                                 let [b, key_lo, key_hi, _] = plan.info[t as usize];
                                 if b != NONE && last[b as usize] != doc {
                                     last[b as usize] = doc;
-                                    terms.push(b);
+                                    terms.push(b as u16);
                                 }
                                 if key_lo != key_hi {
                                     keys.push((i as u32, key_lo, key_hi));
@@ -360,7 +362,7 @@ fn main() {
 
 /// Groups a chunk's per-document BOOL terms by term. Documents are visited in order,
 /// so every list comes out ascending.
-fn counting_sort(base: u32, terms: &[u32], per_doc: &[u32], n_bool: usize) -> ChunkIndex {
+fn counting_sort(base: u32, terms: &[u16], per_doc: &[u32], n_bool: usize) -> ChunkIndex {
     let mut offsets = vec![0u32; n_bool + 1];
     for &b in terms {
         offsets[b as usize + 1] += 1;
@@ -520,7 +522,10 @@ fn plan(text: &'static [u8]) -> Plan {
         info: (0..n_terms)
             .map(|t| [bool_index[t], key_first[t], key_first[t + 1], 0])
             .collect(),
-        n_bool: n_bool as usize,
+        n_bool: {
+            assert!(n_bool <= 1 << 16, "BOOL term indices are 16-bit");
+            n_bool as usize
+        },
         queries,
         phrases,
         keyed,
