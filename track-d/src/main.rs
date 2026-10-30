@@ -18,21 +18,21 @@
 
 mod mmap;
 
-use std::fs::File;
-use std::io::Write;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
-/// Marks an unused slot in a row. Node ids are below n < 2^32 - 2.
-const EMPTY: u32 = u32::MAX;
-/// In a row's last slot: the node's remaining edges are overflow list number `weight`.
-const SPILL: u32 = u32::MAX - 1;
+/// An edge is one word, `head << 32 | weight`. Node ids are below n < 2^32 - 2.
+const EMPTY: u64 = u64::MAX;
+/// In a row's last slot, `SPILL << 32 | k`: the node's remaining edges are list k.
+const SPILL: u64 = u32::MAX as u64 - 1;
 
-/// Up to four (head, weight) edges of one node, in one aligned half cache line.
-#[derive(Clone, Copy)]
+/// Up to four edges of one node, in one aligned half cache line. Atomic so the build
+/// threads can place edges without unsafe code; relaxed loads and stores compile to
+/// plain moves.
 #[repr(C, align(32))]
-struct Row([(u32, u32); 4]);
+struct Row([AtomicU64; 4]);
 
 /// One direction of the graph: each node's edges in its own row, plus overflow lists
 /// for nodes with more than four.
@@ -40,23 +40,27 @@ struct Adjacency {
     rows: Vec<Row>,
     /// Overflow list k is `spill_edges[spill_first[k]..spill_first[k + 1]]`.
     spill_first: Vec<u32>,
-    spill_edges: Vec<(u32, u32)>,
+    spill_edges: Vec<AtomicU64>,
 }
 
 impl Adjacency {
     /// Empty rows sized for the given degrees; a node with more than four edges gets
     /// an overflow list and a SPILL marker in its last slot.
     fn with_degrees(degree: &[AtomicU32]) -> Adjacency {
-        let mut rows = vec![Row([(EMPTY, 0); 4]); degree.len()];
         let mut spill_first = vec![0u32];
-        for (u, d) in degree.iter().enumerate() {
-            let d = d.load(Relaxed);
-            if d > 4 {
-                rows[u].0[3] = (SPILL, spill_first.len() as u32 - 1);
-                spill_first.push(spill_first.last().unwrap() + d - 3);
-            }
-        }
-        let spill_edges = vec![(0, 0); *spill_first.last().unwrap() as usize];
+        let rows = (degree.iter().map(|d| d.load(Relaxed)))
+            .map(|d| {
+                let row = Row(std::array::from_fn(|_| AtomicU64::new(EMPTY)));
+                if d > 4 {
+                    row.0[3].store(SPILL << 32 | (spill_first.len() as u64 - 1), Relaxed);
+                    spill_first.push(spill_first.last().unwrap() + d - 3);
+                }
+                row
+            })
+            .collect();
+        let spill_edges = (0..*spill_first.last().unwrap())
+            .map(|_| AtomicU64::new(0))
+            .collect();
         Adjacency {
             rows,
             spill_first,
@@ -64,27 +68,41 @@ impl Adjacency {
         }
     }
 
+    /// Puts edge `e` of node `u` into slot `slot`, counted down from u's degree. Slot
+    /// 3 of a spilled node holds its marker: its slots 0..3 are inline, the rest go to
+    /// its overflow list.
+    fn place(&self, u: u32, slot: usize, e: u64) {
+        let last = self.rows[u as usize].0[3].load(Relaxed);
+        match last >> 32 {
+            SPILL if slot >= 3 => {
+                &self.spill_edges[self.spill_first[last as u32 as usize] as usize + slot - 3]
+            }
+            _ => &self.rows[u as usize].0[slot],
+        }
+        .store(e, Relaxed);
+    }
+
     fn has_edges(&self, u: u32) -> bool {
-        self.rows[u as usize].0[0].0 != EMPTY
+        self.rows[u as usize].0[0].load(Relaxed) != EMPTY
     }
 
     /// Calls `f(other end, weight)` for every edge of `u`.
     #[inline]
     fn for_each_edge(&self, u: u32, mut f: impl FnMut(u32, u32)) {
-        for &(v, w) in &self.rows[u as usize].0 {
-            match v {
-                EMPTY => return,
+        for e in &self.rows[u as usize].0 {
+            let e = e.load(Relaxed);
+            match e >> 32 {
+                _ if e == EMPTY => return,
                 SPILL => {
-                    let (lo, hi) = (
-                        self.spill_first[w as usize],
-                        self.spill_first[w as usize + 1],
-                    );
-                    for &(v, w) in &self.spill_edges[lo as usize..hi as usize] {
-                        f(v, w);
-                    }
+                    let k = e as u32 as usize;
+                    let list = &self.spill_edges
+                        [self.spill_first[k] as usize..self.spill_first[k + 1] as usize];
+                    list.iter()
+                        .map(|e| e.load(Relaxed))
+                        .for_each(|e| f((e >> 32) as u32, e as u32));
                     return;
                 }
-                _ => f(v, w),
+                v => f(v as u32, e as u32),
             }
         }
     }
@@ -102,45 +120,6 @@ impl Adjacency {
     }
 }
 
-/// Raw write access to an `Adjacency` for the placement pass, whose threads write
-/// disjoint slots.
-struct Placer {
-    rows: *mut (u32, u32),
-    spill: *mut (u32, u32),
-}
-
-// SAFETY: only used for the disjoint writes described in `place`.
-unsafe impl Sync for Placer {}
-
-impl Placer {
-    fn new(adj: &mut Adjacency) -> Placer {
-        Placer {
-            rows: adj.rows.as_mut_ptr().cast(),
-            spill: adj.spill_edges.as_mut_ptr(),
-        }
-    }
-
-    /// Puts edge `e` of node `u` into slot `slot` (counted down from u's degree).
-    ///
-    /// # Safety
-    /// Every (u, slot) must be written once, by one thread, with slot below u's degree
-    /// as counted for `adj`, and `adj` must not be read until placement ends.
-    unsafe fn place(&self, adj: &Adjacency, u: u32, slot: usize, e: (u32, u32)) {
-        // Slot 3 of a spilled node was written before placement began and is never
-        // placed into (its slots 0..3 are inline and the rest go to its list).
-        let last = adj.rows[u as usize].0[3];
-        unsafe {
-            if last.0 == SPILL && slot >= 3 {
-                self.spill
-                    .add(adj.spill_first[last.1 as usize] as usize + slot - 3)
-                    .write(e);
-            } else {
-                self.rows.add(u as usize * 4 + slot).write(e);
-            }
-        }
-    }
-}
-
 struct Graph {
     out: Adjacency,
     into: Adjacency,
@@ -154,7 +133,8 @@ fn main() {
         .map_or(1, |n| n.get())
         .min(12);
     let graph = load_graph(mmap::map(&data.join("graph.txt")), threads);
-    let queries: Vec<(u32, u32)> = lines(mmap::map(&data.join("queries.txt")))
+    let queries: Vec<(u32, u32)> = (mmap::map(&data.join("queries.txt")).split(|&b| b == b'\n'))
+        .filter(|l| !l.is_empty())
         .map(|l| {
             let (s, p) = number(l, 0);
             (s as u32, number(l, p + 1).0 as u32)
@@ -179,17 +159,14 @@ fn main() {
         }
     });
 
-    let mut buf = Vec::with_capacity(queries.len() * 8);
+    let mut text = String::with_capacity(queries.len() * 8);
     for a in &answers {
         match a.load(Relaxed) {
-            u64::MAX => buf.extend_from_slice(b"-1"),
-            d => push_num(&mut buf, d),
+            u64::MAX => text.push_str("-1\n"),
+            d => writeln!(text, "{d}").unwrap(),
         }
-        buf.push(b'\n');
     }
-    File::create(out.join("distances.txt"))
-        .and_then(|mut f| f.write_all(&buf))
-        .expect("write distances.txt");
+    std::fs::write(out.join("distances.txt"), text).expect("write distances.txt");
 }
 
 fn load_graph(text: &'static [u8], threads: usize) -> Graph {
@@ -210,24 +187,20 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
             in_degree[v as usize].fetch_add(1, Relaxed);
         });
     });
-    let mut out = Adjacency::with_degrees(&out_degree);
-    let mut into = Adjacency::with_degrees(&in_degree);
+    let (out, into) = (
+        Adjacency::with_degrees(&out_degree),
+        Adjacency::with_degrees(&in_degree),
+    );
 
     // Pass 2: place every edge in both directions. Counting each degree down hands
     // out slots d-1..0; the order inside one node's edges varies between runs, which
     // cannot change a distance.
-    let (out_dst, into_dst) = (Placer::new(&mut out), Placer::new(&mut into));
-    let (out_ref, into_ref) = (&out, &into);
     for_each_chunk(&chunks, threads, |chunk| {
         for_each_line(chunk, |u, v, w| {
             let out_slot = out_degree[u as usize].fetch_sub(1, Relaxed) as usize - 1;
             let into_slot = in_degree[v as usize].fetch_sub(1, Relaxed) as usize - 1;
-            // SAFETY: pass 1 counted exactly these edges, so each countdown gives every
-            // edge its own slot below the node's degree, written by this thread alone.
-            unsafe {
-                out_dst.place(out_ref, u, out_slot, (v, w));
-                into_dst.place(into_ref, v, into_slot, (u, w));
-            }
+            out.place(u, out_slot, (v as u64) << 32 | w as u64);
+            into.place(v, into_slot, (u as u64) << 32 | w as u64);
         });
     });
     Graph { out, into }
@@ -408,6 +381,9 @@ impl RadixHeap {
     }
 }
 
+/// An empty key in a distance map.
+const NO_KEY: u32 = u32::MAX;
+
 /// Open-addressing map from node to tentative distance. Missing means infinity.
 struct DistMap {
     keys: Vec<u32>,
@@ -418,19 +394,23 @@ struct DistMap {
 
 impl Default for DistMap {
     fn default() -> Self {
-        DistMap {
-            keys: vec![EMPTY; 1024],
-            vals: vec![0; 1024],
-            used: Vec::new(),
-        }
+        DistMap::with_capacity(1024)
     }
 }
 
 impl DistMap {
+    fn with_capacity(cap: usize) -> DistMap {
+        DistMap {
+            keys: vec![NO_KEY; cap],
+            vals: vec![0; cap],
+            used: Vec::new(),
+        }
+    }
+
     /// Empties the map, keeping its capacity warm for the next large query.
     fn clear(&mut self) {
         for &i in &self.used {
-            self.keys[i as usize] = EMPTY;
+            self.keys[i as usize] = NO_KEY;
         }
         self.used.clear();
     }
@@ -439,7 +419,7 @@ impl DistMap {
     fn slot(&self, k: u32) -> usize {
         let mask = self.keys.len() - 1;
         let mut i = (k.wrapping_mul(0x9e37_79b9) >> 7) as usize & mask;
-        while self.keys[i] != EMPTY && self.keys[i] != k {
+        while self.keys[i] != NO_KEY && self.keys[i] != k {
             i = (i + 1) & mask;
         }
         i
@@ -476,15 +456,7 @@ impl DistMap {
     }
 
     fn grow(&mut self) {
-        let cap = self.keys.len() * 2;
-        let old = std::mem::replace(
-            self,
-            DistMap {
-                keys: vec![EMPTY; cap],
-                vals: vec![0; cap],
-                used: Vec::new(),
-            },
-        );
+        let old = std::mem::replace(self, DistMap::with_capacity(self.keys.len() * 2));
         for &j in &old.used {
             let (k, v) = (old.keys[j as usize], old.vals[j as usize]);
             let i = self.slot(k);
@@ -504,24 +476,6 @@ fn number(c: &[u8], mut p: usize) -> (u64, usize) {
         p += 1;
     }
     (v, p)
-}
-
-fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
-    text.split(|&b| b == b'\n').filter(|l| !l.is_empty())
-}
-
-fn push_num(out: &mut Vec<u8>, mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&buf[i..]);
 }
 
 /// Splits `data` into `n` chunks that each end just after a newline.
