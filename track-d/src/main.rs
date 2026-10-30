@@ -23,10 +23,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
-/// An edge is one word, `head << 32 | weight`. Node ids are below n < 2^32 - 2.
-const EMPTY: u64 = u64::MAX;
+/// An edge is one word, `(head + 1) << 32 | weight`, so an all-zero row is empty and
+/// rows can come from zeroed memory with no fill pass. Node ids are below n < 2^32 - 2.
+const EMPTY: u64 = 0;
 /// In a row's last slot, `SPILL << 32 | k`: the node's remaining edges are list k.
-const SPILL: u64 = u32::MAX as u64 - 1;
+const SPILL: u64 = u32::MAX as u64;
 
 /// Up to four edges of one node, in one aligned half cache line. Atomic so the build
 /// threads can place edges without unsafe code; relaxed loads and stores compile to
@@ -46,18 +47,15 @@ struct Adjacency {
 impl Adjacency {
     /// Empty rows sized for the given degrees; a node with more than four edges gets
     /// an overflow list and a SPILL marker in its last slot.
-    fn with_degrees(degree: &[AtomicU32]) -> Adjacency {
+    fn with_degrees(degree: &[AtomicU32], threads: usize) -> Adjacency {
         let mut spill_first = vec![0u32];
-        let rows = (degree.iter().map(|d| d.load(Relaxed)))
-            .map(|d| {
-                let row = Row(std::array::from_fn(|_| AtomicU64::new(EMPTY)));
-                if d > 4 {
-                    row.0[3].store(SPILL << 32 | (spill_first.len() as u64 - 1), Relaxed);
-                    spill_first.push(spill_first.last().unwrap() + d - 3);
-                }
-                row
-            })
-            .collect();
+        let rows: Vec<Row> = zeroed(degree.len(), threads);
+        for (row, d) in rows.iter().zip(degree.iter().map(|d| d.load(Relaxed))) {
+            if d > 4 {
+                row.0[3].store(SPILL << 32 | (spill_first.len() as u64 - 1), Relaxed);
+                spill_first.push(spill_first.last().unwrap() + d - 3);
+            }
+        }
         let spill_edges = (0..*spill_first.last().unwrap())
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -99,10 +97,10 @@ impl Adjacency {
                         [self.spill_first[k] as usize..self.spill_first[k + 1] as usize];
                     list.iter()
                         .map(|e| e.load(Relaxed))
-                        .for_each(|e| f((e >> 32) as u32, e as u32));
+                        .for_each(|e| f((e >> 32) as u32 - 1, e as u32));
                     return;
                 }
-                v => f(v as u32, e as u32),
+                v => f(v as u32 - 1, e as u32),
             }
         }
     }
@@ -117,6 +115,51 @@ impl Adjacency {
             _mm_prefetch::<_MM_HINT_T0>(self.rows.as_ptr().add(u as usize) as *const i8);
         }
         let _ = u;
+    }
+}
+
+/// `n` zeroed values from a zeroed allocation, with every page touched first by all
+/// threads in parallel, each over its own contiguous range. Without that, a single
+/// thread fills the memory, or the pages fault one by one inside the random-write
+/// build passes, both of which measured slower.
+fn zeroed<T: Zeroable + Sync>(n: usize, threads: usize) -> Vec<T> {
+    let layout = std::alloc::Layout::array::<T>(n).expect("allocation size");
+    if layout.size() == 0 {
+        return Vec::new();
+    }
+    // SAFETY: `Zeroable` types are valid as all-zero bytes; the allocation has the
+    // layout of `n` values of T and is handed to the Vec that will free it.
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut T;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        let v = Vec::from_raw_parts(ptr, n, n);
+        let step = (4096 / std::mem::size_of::<T>()).max(1);
+        thread::scope(|s| {
+            for part in v.chunks(n.div_ceil(threads)) {
+                s.spawn(move || part.iter().step_by(step).for_each(T::touch));
+            }
+        });
+        v
+    }
+}
+
+/// Types whose all-zero bit pattern is a valid value, and that can be written
+/// through a shared reference (to fault their page in).
+trait Zeroable {
+    fn touch(&self);
+}
+
+impl Zeroable for AtomicU32 {
+    fn touch(&self) {
+        self.store(0, Relaxed);
+    }
+}
+
+impl Zeroable for Row {
+    fn touch(&self) {
+        self.0[0].store(EMPTY, Relaxed);
     }
 }
 
@@ -179,8 +222,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
     let chunks = split_lines(&text[header_end..], threads * 4);
 
     // Pass 1: out- and in-degrees.
-    let out_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
-    let in_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    let (out_degree, in_degree): (Vec<AtomicU32>, Vec<AtomicU32>) =
+        (zeroed(n, threads), zeroed(n, threads));
     for_each_chunk(&chunks, threads, |chunk| {
         for_each_line(chunk, |u, v, _| {
             out_degree[u as usize].fetch_add(1, Relaxed);
@@ -188,8 +231,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         });
     });
     let (out, into) = (
-        Adjacency::with_degrees(&out_degree),
-        Adjacency::with_degrees(&in_degree),
+        Adjacency::with_degrees(&out_degree, threads),
+        Adjacency::with_degrees(&in_degree, threads),
     );
 
     // Pass 2: place every edge in both directions. Counting each degree down hands
@@ -199,8 +242,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         for_each_line(chunk, |u, v, w| {
             let out_slot = out_degree[u as usize].fetch_sub(1, Relaxed) as usize - 1;
             let into_slot = in_degree[v as usize].fetch_sub(1, Relaxed) as usize - 1;
-            out.place(u, out_slot, (v as u64) << 32 | w as u64);
-            into.place(v, into_slot, (u as u64) << 32 | w as u64);
+            out.place(u, out_slot, (v as u64 + 1) << 32 | w as u64);
+            into.place(v, into_slot, (u as u64 + 1) << 32 | w as u64);
         });
     });
     Graph { out, into }
