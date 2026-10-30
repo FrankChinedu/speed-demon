@@ -112,17 +112,60 @@ fn main() {
 
     // Prefix sums: `starts[g]` is group g's first slot; each thread's counts become its
     // private write cursors inside every group, so the scatter needs no synchronisation.
+    // In parallel over ranges of groups: each range's total first, then each range
+    // turns its counts into cursors from its own starting offset.
+    let ranges: Vec<(usize, usize)> = (0..threads)
+        .map(|k| (groups * k / threads, groups * (k + 1) / threads))
+        .collect();
+    let range_totals: Vec<u32> = thread::scope(|s| {
+        let handles: Vec<_> = ranges
+            .iter()
+            .map(|&(g0, g1)| {
+                let cursors = &cursors;
+                s.spawn(move || {
+                    cursors
+                        .iter()
+                        .map(|c| c[g0..g1].iter().sum::<u32>())
+                        .sum::<u32>()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
     let mut starts = vec![0u32; groups + 1];
-    let mut total = 0u32;
-    for g in 0..groups {
-        starts[g] = total;
-        for c in cursors.iter_mut() {
-            let n = c[g];
-            c[g] = total;
-            total += n;
+    let total: u32 = range_totals.iter().sum();
+    starts[groups] = total;
+    let mut pieces: Vec<Vec<&mut [u32]>> = ranges.iter().map(|_| Vec::new()).collect();
+    for c in cursors
+        .iter_mut()
+        .map(Vec::as_mut_slice)
+        .chain([&mut starts[..groups]])
+    {
+        let mut rest = c;
+        for (piece, &(g0, g1)) in pieces.iter_mut().zip(&ranges) {
+            let (mine, tail) = rest.split_at_mut(g1 - g0);
+            piece.push(mine);
+            rest = tail;
         }
     }
-    starts[groups] = total;
+    thread::scope(|s| {
+        let mut offset = 0u32;
+        for (mut piece, &range_total) in pieces.into_iter().zip(&range_totals) {
+            let mut at = offset;
+            offset += range_total;
+            s.spawn(move || {
+                let starts = piece.pop().unwrap();
+                for (i, start) in starts.iter_mut().enumerate() {
+                    *start = at;
+                    for c in piece.iter_mut() {
+                        let n = c[i];
+                        c[i] = at;
+                        at += n;
+                    }
+                }
+            });
+        }
+    });
 
     // Zeroed memory: pages are charged only as the scatter first writes them.
     let mut latencies = vec![0u32; total as usize];
