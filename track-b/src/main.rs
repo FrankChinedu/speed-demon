@@ -220,8 +220,9 @@ fn main() {
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    // About 8 MB per chunk: ~8,000 documents, well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 2).max(docs.len() >> 23));
+    // Four chunks per thread, so the last round is not left half empty; at most
+    // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
+    let chunks = split_lines(docs, (threads * 4).max(docs.len() >> 23));
 
     // The single pass over the corpus. Chunks are handed out dynamically.
     let next = AtomicUsize::new(0);
