@@ -187,6 +187,8 @@ fn main() {
         }
     });
 
+    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     // Cut the groups into ranges of roughly equal record counts and format them in parallel.
     let per = (total as usize).div_ceil(threads).max(1);
     let mut cuts: Vec<usize> = (1..threads)
