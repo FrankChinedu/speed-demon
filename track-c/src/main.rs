@@ -22,6 +22,7 @@ use std::fs::File;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::thread;
 
@@ -34,7 +35,8 @@ impl Hasher for Fx {
         const K: u64 = 0x517c_c1b7_2722_0a95;
         let mut chunks = bytes.chunks_exact(8);
         for c in &mut chunks {
-            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(K);
+            self.0 =
+                (self.0.rotate_left(5) ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(K);
         }
         let mut tail = [0u8; 8];
         tail[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
@@ -50,8 +52,11 @@ const BOM: &[u8] = b"\xEF\xBB\xBF";
 const NO_REGION: u16 = u16::MAX;
 /// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
 const NAME_SLOTS: usize = 1 << 19;
-/// Bits reserved per country. Pages a country never touches are never charged.
-const MAX_IDS: usize = 1 << 20;
+/// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
+/// Rarer ids beyond it go to an overflow list, so the count stays exact regardless.
+const MAX_IDS: usize = 1 << 17;
+/// Arena for distinct names: about 2 MB is used; only touched pages are charged.
+const ARENA_BYTES: usize = 64 << 20;
 
 /// Running aggregates for one output line.
 #[derive(Clone, Copy)]
@@ -88,25 +93,42 @@ impl Agg {
 }
 
 fn main() {
+    mmap::small_pages();
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")));
     let records = mmap::map(&data.join("records.csv"));
-    let threads = thread::available_parallelism().map_or(1, |n| n.get()).min(12);
+    let threads = thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(12);
     let groups = codes.len() + 1; // the last group is _UNMATCHED
 
-    // Every name's bytes fit in the file, so the arena can never overflow.
-    let names = Names::new(records.len() + 4 * (records.len() / 8 + 1));
+    let names = Names::new(ARENA_BYTES.min(records.len() + 4 * (records.len() / 8 + 1)));
     let seen = zeroed_atomics(groups * MAX_IDS / 64);
-    let chunks = split_records(records, threads);
+    let overflow = Mutex::new(Vec::new());
+    // Many chunks handed out on demand, so a slow core never holds up the rest.
+    let chunks = split_records(records, threads * 8);
+    let next = AtomicUsize::new(0);
     let aggs: Vec<Agg> = thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .enumerate()
-            .map(|(k, &chunk)| {
-                let (region, names, seen) = (&region, &names, &seen);
-                s.spawn(move || parse(chunk, k == 0, region, groups, names, seen))
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let (region, names, seen, overflow, chunks, next) =
+                    (&region, &names, &seen, &overflow, &chunks, &next);
+                s.spawn(move || {
+                    let mut aggs = vec![Agg::EMPTY; groups];
+                    loop {
+                        let k = next.fetch_add(1, Relaxed);
+                        let Some(&chunk) = chunks.get(k) else {
+                            break aggs;
+                        };
+                        let sink = Seen {
+                            bits: seen,
+                            overflow,
+                        };
+                        parse(chunk, k == 0, region, &mut aggs, names, &sink);
+                    }
+                })
             })
             .collect();
         let mut total = vec![Agg::EMPTY; groups];
@@ -123,16 +145,29 @@ fn main() {
     order.sort_unstable_by_key(|&g| codes[g]);
     order.push(codes.len());
 
-    let used_words = (names.next_id.load(Relaxed) as usize).div_ceil(64);
+    let used_words = (names.next_id.load(Relaxed) as usize)
+        .min(MAX_IDS)
+        .div_ceil(64);
+    let mut overflow = overflow.into_inner().unwrap();
+    overflow.sort_unstable();
+    overflow.dedup();
     let mut buf = Vec::with_capacity(groups * 80);
     for g in order {
         let a = &aggs[g];
         if a.count == 0 {
             continue;
         }
-        buf.extend_from_slice(if g < codes.len() { codes[g] } else { b"_UNMATCHED" });
+        buf.extend_from_slice(if g < codes.len() {
+            codes[g]
+        } else {
+            b"_UNMATCHED"
+        });
         let words = &seen[g * MAX_IDS / 64..][..used_words];
-        let distinct: u32 = words.iter().map(|w| w.load(Relaxed).count_ones()).sum();
+        let distinct = words
+            .iter()
+            .map(|w| w.load(Relaxed).count_ones())
+            .sum::<u32>()
+            + overflow.iter().filter(|&&(og, _)| og == g).count() as u32;
         for (v, money) in [
             (a.count as i64, false),
             (a.id_sum as i64, false),
@@ -163,9 +198,15 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u16>) {
     let mut codes: Vec<&[u8]> = Vec::new();
     let mut index: HashMap<&[u8], u16, BuildHasherDefault<Fx>> = HashMap::default();
     let mut region = Vec::new();
-    for line in text.split(|&b| b == b'\n').skip(1).filter(|l| !l.is_empty()) {
+    for line in text
+        .split(|&b| b == b'\n')
+        .skip(1)
+        .filter(|l| !l.is_empty())
+    {
         let comma = line.iter().position(|&b| b == b',').expect("region line");
-        let id = line[..comma].iter().fold(0usize, |acc, &b| acc * 10 + (b - b'0') as usize);
+        let id = line[..comma]
+            .iter()
+            .fold(0usize, |acc, &b| acc * 10 + (b - b'0') as usize);
         let code = &line[comma + 1..];
         let c = *index.entry(code).or_insert_with(|| {
             codes.push(code);
@@ -214,13 +255,33 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 }
 
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
-fn parse(c: &[u8], first: bool, region: &[u16], groups: usize, names: &Names, seen: &[AtomicU64]) -> Vec<Agg> {
-    let unmatched = (groups - 1) as u16;
-    let mut aggs = vec![Agg::EMPTY; groups];
+/// Where each (country, name id) pair is recorded.
+struct Seen<'a> {
+    bits: &'a [AtomicU64],
+    overflow: &'a Mutex<Vec<(usize, u32)>>,
+}
+
+impl Seen<'_> {
+    #[inline]
+    fn insert(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            let bit = g * MAX_IDS + id as usize;
+            self.bits[bit / 64].fetch_or(1 << (bit % 64), Relaxed);
+        } else {
+            self.overflow.lock().unwrap().push((g, id));
+        }
+    }
+}
+
+fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
+    let unmatched = (aggs.len() - 1) as u16;
     let mut p = 0;
     if first {
         // The header is the first record: skip it, with the file's leading BOM.
-        p = c.iter().position(|&b| b == b'\n').map_or(c.len(), |i| i + 1);
+        p = c
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(c.len(), |i| i + 1);
     }
     while p < c.len() {
         if c[p..].starts_with(BOM) {
@@ -231,11 +292,12 @@ fn parse(c: &[u8], first: bool, region: &[u16], groups: usize, names: &Names, se
         let note = field(c, name.end + 1);
         let (region_id, next) = digits(c, note.end + 1);
         let (cents, next) = amount(c, next + 1);
-        p = next + match c.get(next) {
-            Some(b'\r') => 2,
-            Some(_) => 1,
-            None => 0,
-        };
+        p = next
+            + match c.get(next) {
+                Some(b'\r') => 2,
+                Some(_) => 1,
+                None => 0,
+            };
 
         let g = match region.get(region_id as usize) {
             Some(&r) if r != NO_REGION => r as usize,
@@ -250,10 +312,8 @@ fn parse(c: &[u8], first: bool, region: &[u16], groups: usize, names: &Names, se
         a.name_bytes += (name.len() - name.escapes) as u64;
         a.note_bytes += (note.len() - note.escapes) as u64;
 
-        let bit = g * MAX_IDS + names.id(&c[name.start..name.end_content]) as usize;
-        seen[bit / 64].fetch_or(1 << (bit % 64), Relaxed);
+        seen.insert(g, names.id(&c[name.start..name.end_content]));
     }
-    aggs
 }
 
 /// Lock-free interning of raw name bytes into dense ids, shared by all threads.
@@ -313,8 +373,11 @@ impl Names {
         assert!(raw.len() < 1 << 16, "name too long");
         let off = self.used.fetch_add(4 + raw.len(), Relaxed);
         let id = self.next_id.fetch_add(1, Relaxed);
-        assert!((id as usize) < MAX_IDS && off < 1 << 32, "too many distinct names");
-        for (dst, &b) in self.arena[off..].iter().zip(id.to_le_bytes().iter().chain(raw)) {
+        assert!(off + 4 + raw.len() <= self.arena.len(), "name arena full");
+        for (dst, &b) in self.arena[off..]
+            .iter()
+            .zip(id.to_le_bytes().iter().chain(raw))
+        {
             dst.store(b, Relaxed);
         }
         (off as u64) << 32 | (raw.len() as u64) << 16 | tag
@@ -322,7 +385,11 @@ impl Names {
 
     fn equals(&self, s: u64, raw: &[u8]) -> bool {
         let (off, len) = ((s >> 32) as usize + 4, (s >> 16 & 0xffff) as usize);
-        len == raw.len() && self.arena[off..off + len].iter().zip(raw).all(|(a, &b)| a.load(Relaxed) == b)
+        len == raw.len()
+            && self.arena[off..off + len]
+                .iter()
+                .zip(raw)
+                .all(|(a, &b)| a.load(Relaxed) == b)
     }
 
     fn id_at(&self, s: u64) -> u32 {
@@ -359,20 +426,48 @@ impl Field {
 #[inline]
 fn field(c: &[u8], p: usize) -> Field {
     if c[p] != b'"' {
-        let len = c[p..].iter().position(|&b| b == b',').expect("comma after field");
-        return Field { start: p, end_content: p + len, end: p + len, escapes: 0 };
+        let end = find(c, p, b',');
+        return Field {
+            start: p,
+            end_content: end,
+            end,
+            escapes: 0,
+        };
     }
     let mut i = p + 1;
     let mut escapes = 0;
     loop {
-        i += c[i..].iter().position(|&b| b == b'"').expect("closing quote");
+        i = find(c, i, b'"');
         if c.get(i + 1) == Some(&b'"') {
             escapes += 1;
             i += 2;
         } else {
-            return Field { start: p + 1, end_content: i, end: i + 1, escapes };
+            return Field {
+                start: p + 1,
+                end_content: i,
+                end: i + 1,
+                escapes,
+            };
         }
     }
+}
+
+/// Position of the first `byte` at or after `p`, eight bytes at a time.
+#[inline]
+fn find(c: &[u8], mut p: usize, byte: u8) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    while let Some(w) = c.get(p..p + 8) {
+        let x = u64::from_le_bytes(w.try_into().unwrap()) ^ (ONES * byte as u64);
+        let hits = x.wrapping_sub(ONES) & !x & (ONES << 7); // high bit set where x has a 0 byte
+        if hits != 0 {
+            return p + hits.trailing_zeros() as usize / 8;
+        }
+        p += 8;
+    }
+    p + c[p..]
+        .iter()
+        .position(|&b| b == byte)
+        .expect("field terminator")
 }
 
 /// An unsigned decimal at `p`; returns it and the position of the byte after it.

@@ -37,6 +37,7 @@ struct Parsed {
 }
 
 fn main() {
+    mmap::small_pages();
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
