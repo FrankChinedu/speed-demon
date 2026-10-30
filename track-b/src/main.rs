@@ -595,11 +595,24 @@ type Key = [u64; 4];
 
 /// Open-addressing table from query terms to ids, built once, read by every thread.
 /// Each slot packs a 32-bit hash tag with `id + 1`, so a miss is decided from the
-/// slot array alone without touching any key.
+/// slot array alone without touching any key. In front of it, a 128 KB bit filter
+/// (two bits per term) that stays in L2: most corpus tokens are not query terms, and
+/// the filter turns their lookup from a cache miss into the table into a cached test.
 struct Terms {
     mask: usize,
     slots: Vec<u64>,
     keys: Vec<Key>,
+    filter: Vec<u64>,
+}
+
+const FILTER_BITS: u32 = 20;
+
+#[inline]
+fn filter_bits(h: u64) -> (usize, usize) {
+    (
+        (h >> (64 - FILTER_BITS)) as usize,
+        (h >> (40 - FILTER_BITS)) as usize & ((1 << FILTER_BITS) - 1),
+    )
 }
 
 impl Terms {
@@ -609,6 +622,7 @@ impl Terms {
             mask: cap - 1,
             slots: vec![0; cap],
             keys: vec![[0; 4]; ids.len()],
+            filter: vec![0; 1 << (FILTER_BITS - 6)],
         };
         for (&word, &id) in ids {
             let mut bytes = [0u8; MAX_TERM];
@@ -621,6 +635,9 @@ impl Terms {
             }
             t.slots[i] = (h >> 32) << 32 | (id as u64 + 1);
             t.keys[id as usize] = key;
+            let (a, b) = filter_bits(h);
+            t.filter[a / 64] |= 1 << (a % 64);
+            t.filter[b / 64] |= 1 << (b % 64);
         }
         t
     }
@@ -628,6 +645,10 @@ impl Terms {
     #[inline]
     fn get(&self, key: &Key) -> u32 {
         let h = hash(key);
+        let (a, b) = filter_bits(h);
+        if self.filter[a / 64] >> (a % 64) & self.filter[b / 64] >> (b % 64) & 1 == 0 {
+            return NONE;
+        }
         let mut i = h as usize & self.mask;
         loop {
             let s = self.slots[i];
