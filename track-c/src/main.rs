@@ -561,9 +561,27 @@ fn find(c: &[u8], mut p: usize, byte: u8) -> usize {
         .expect("field terminator")
 }
 
-/// An unsigned decimal at `p`; returns it and the position of the byte after it.
+/// An unsigned decimal at `p`, ended by `,` or `.`; returns it and the position of
+/// the byte after it. Up to seven digits (every region id and amount, and ids below
+/// ten million) are found and converted with word arithmetic: find the delimiter in
+/// one 8-byte load, left-align the digits, then combine pairs, quads and octets by
+/// multiplication. Longer numbers take the byte loop.
 #[inline]
 fn digits(c: &[u8], mut p: usize) -> (u64, usize) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    if let Some(w) = c.get(p..p + 8) {
+        let w = u64::from_le_bytes(w.try_into().unwrap());
+        let zero = |x: u64| x.wrapping_sub(ONES) & !x & (ONES << 7);
+        let n = (zero(w ^ ONES * b',' as u64) | zero(w ^ ONES * b'.' as u64)).trailing_zeros()
+            as usize
+            / 8;
+        if (1..8).contains(&n) {
+            let v = (w << (8 * (8 - n))) & 0x0f0f_0f0f_0f0f_0f0f;
+            let v = v.wrapping_mul(10 * (1 << 8) + 1) >> 8 & 0x00ff_00ff_00ff_00ff;
+            let v = v.wrapping_mul(100 * (1 << 16) + 1) >> 16 & 0x0000_ffff_0000_ffff;
+            return (v.wrapping_mul(10000 * (1 << 32) + 1) >> 32, p + n);
+        }
+    }
     let mut v = 0u64;
     while let Some(&b) = c.get(p).filter(|b| b.is_ascii_digit()) {
         v = v * 10 + (b - b'0') as u64;
