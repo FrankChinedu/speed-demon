@@ -1,0 +1,14 @@
+[package]
+name = "solution"
+version = "0.1.0"
+edition = "2024"
+
+# Every entry here costs ~10% of K on the D axis. Keep it empty.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

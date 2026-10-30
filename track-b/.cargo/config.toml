@@ -1,0 +1,6 @@
+# AVX2/BMI2/FMA for the scoring box (i5-13500, no AVX-512). Scoped to the x86-64
+# target so local arm64 Docker builds ignore it. Deliberately not target-cpu=native:
+# native forces the board to build on the scoring box, and x86-64-v3 runs on any
+# build machine (matters for PGO training runs).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
