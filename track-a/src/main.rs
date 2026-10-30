@@ -110,8 +110,6 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    std::fs::write("/out/summary.txt", b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // Prefix sums: `starts[g]` is group g's first slot; each thread's counts become its
     // private write cursors inside every group, so the scatter needs no synchronisation.
     // In parallel over ranges of groups: each range's total first, then each range
