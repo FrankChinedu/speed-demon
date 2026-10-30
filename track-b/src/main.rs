@@ -85,31 +85,155 @@ enum Query {
 /// Everything known from queries.txt before the corpus is read.
 struct Plan {
     terms: Terms,
-    /// Term id -> dense index among BOOL terms, or NONE.
-    bool_index: Vec<u32>,
+    /// Per term id: [dense BOOL index or NONE, key range start, key range end, 0].
+    /// One aligned 16-byte record, so a token costs one cache line, not three.
+    info: Vec<[u32; 4]>,
     n_bool: usize,
     queries: Vec<Query>,
     phrases: Vec<Vec<u32>>,
     /// Each phrase is checked only where its key term occurs: the phrase's term used
     /// by the fewest queries, a proxy for the rarest in the corpus (almost every
-    /// phrase is built around a rare anchor). Term t's phrases, with the key's
-    /// position inside each, are `keyed[key_first[t]..key_first[t + 1]]`.
-    key_first: Vec<u32>,
+    /// phrase is built around a rare anchor). A term's keyed phrases, with the key's
+    /// position inside each, are the `keyed` range in its info record.
     keyed: Vec<(u32, u32)>,
 }
 
-/// Posting lists of the BOOL terms for one chunk of documents: term b's documents
-/// are `base + docs[offsets[b]..offsets[b + 1]]`, ascending.
+/// Posting sets of the BOOL terms for one chunk of documents, as offsets from `base`.
+/// A sparse term is an ascending list, `docs[offsets[b]..offsets[b + 1]]`. A term in
+/// more than 1/16 of the chunk's documents is a bitmap instead (never larger than
+/// its list would be), listed in `dense` by term with its first word in `bits`.
 struct ChunkIndex {
     base: u32,
+    words: usize,
     offsets: Vec<u32>,
     docs: Vec<u16>,
+    dense: Vec<(u32, u32)>,
+    bits: Vec<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum Set<'a> {
+    List(&'a [u16]),
+    Bits(&'a [u64]),
 }
 
 impl ChunkIndex {
     #[inline]
-    fn list(&self, b: u32) -> &[u16] {
-        &self.docs[self.offsets[b as usize] as usize..self.offsets[b as usize + 1] as usize]
+    fn set(&self, b: u32) -> Set<'_> {
+        let list =
+            &self.docs[self.offsets[b as usize] as usize..self.offsets[b as usize + 1] as usize];
+        if !list.is_empty() {
+            return Set::List(list);
+        }
+        match self.dense.binary_search_by_key(&b, |&(t, _)| t) {
+            Ok(i) => Set::Bits(&self.bits[self.dense[i].1 as usize..][..self.words]),
+            Err(_) => Set::List(list),
+        }
+    }
+}
+
+/// The running result of a BOOL query inside one chunk, kept as a list or a bitmap
+/// depending on what it last met. Buffers are reused across queries.
+#[derive(Default)]
+struct Acc {
+    is_bits: bool,
+    list: Vec<u16>,
+    tmp: Vec<u16>,
+    bits: Vec<u64>,
+}
+
+#[inline]
+fn has(bits: &[u64], d: u16) -> bool {
+    bits[d as usize / 64] >> (d % 64) & 1 == 1
+}
+
+impl Acc {
+    fn start(&mut self, s: Set) {
+        match s {
+            Set::List(l) => {
+                self.is_bits = false;
+                self.list.clear();
+                self.list.extend_from_slice(l);
+            }
+            Set::Bits(b) => {
+                self.is_bits = true;
+                self.bits.clear();
+                self.bits.extend_from_slice(b);
+            }
+        }
+    }
+
+    /// `self = self op s`.
+    fn apply(&mut self, op: Op, s: Set) {
+        match (self.is_bits, s) {
+            (false, Set::List(l)) => {
+                apply(op, &self.list, l, &mut self.tmp);
+                std::mem::swap(&mut self.list, &mut self.tmp);
+            }
+            (false, Set::Bits(b)) => match op {
+                Op::And => self.list.retain(|&d| has(b, d)),
+                Op::Not => self.list.retain(|&d| !has(b, d)),
+                Op::Or => {
+                    self.bits.clear();
+                    self.bits.extend_from_slice(b);
+                    for &d in &self.list {
+                        self.bits[d as usize / 64] |= 1 << (d % 64);
+                    }
+                    self.is_bits = true;
+                }
+            },
+            (true, Set::List(l)) => match op {
+                Op::And => {
+                    self.list.clear();
+                    self.list
+                        .extend(l.iter().copied().filter(|&d| has(&self.bits, d)));
+                    self.is_bits = false;
+                }
+                Op::Or => l
+                    .iter()
+                    .for_each(|&d| self.bits[d as usize / 64] |= 1 << (d % 64)),
+                Op::Not => l
+                    .iter()
+                    .for_each(|&d| self.bits[d as usize / 64] &= !(1 << (d % 64))),
+            },
+            (true, Set::Bits(b)) => {
+                for (x, &y) in self.bits.iter_mut().zip(b) {
+                    *x = match op {
+                        Op::And => *x & y,
+                        Op::Or => *x | y,
+                        Op::Not => *x & !y,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Feeds the chunk's result to `out`, ascending.
+    fn emit(&self, base: u32, out: &mut Summary) {
+        emit(
+            if self.is_bits {
+                Set::Bits(&self.bits)
+            } else {
+                Set::List(&self.list)
+            },
+            base,
+            out,
+        );
+    }
+}
+
+fn emit(s: Set, base: u32, out: &mut Summary) {
+    match s {
+        Set::List(l) => l.iter().for_each(|&d| out.add(base + d as u32)),
+        Set::Bits(b) => {
+            for (k, &w) in b.iter().enumerate() {
+                let mut w = w;
+                while w != 0 {
+                    out.add(base + (k * 64) as u32 + w.trailing_zeros());
+                    w &= w - 1;
+                }
+            }
+        }
     }
 }
 
@@ -140,27 +264,33 @@ fn main() {
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         // Each document's distinct BOOL terms, back to back, and how many each has.
                         let mut terms: Vec<u32> = Vec::with_capacity(chunk.len() / 12);
+                        let mut keys: Vec<(u32, u32, u32)> = Vec::new();
                         let mut per_doc: Vec<u32> = Vec::new();
                         let mut matches = Vec::new();
                         let mut base = None;
                         for_each_doc(chunk, |doc, text| {
                             base.get_or_insert(doc);
                             ids.clear();
-                            tokenize(text, &plan.terms, &mut mask, |t| ids.push(t));
+                            keys.clear();
                             let before = terms.len();
-                            for &t in &ids {
-                                let b = if t == NONE {
-                                    NONE
-                                } else {
-                                    plan.bool_index[t as usize]
-                                };
-                                if b != NONE && last[b as usize] != doc {
-                                    last[b as usize] = doc;
-                                    terms.push(b);
+                            // One pass: record the token, its BOOL posting (once per
+                            // document) and whether a phrase is keyed on it, all from
+                            // the term's single 16-byte info record.
+                            tokenize(text, &plan.terms, &mut mask, |t| {
+                                if t != NONE {
+                                    let [b, key_lo, key_hi, _] = plan.info[t as usize];
+                                    if b != NONE && last[b as usize] != doc {
+                                        last[b as usize] = doc;
+                                        terms.push(b);
+                                    }
+                                    if key_lo != key_hi {
+                                        keys.push((ids.len() as u32, key_lo, key_hi));
+                                    }
                                 }
-                            }
+                                ids.push(t);
+                            });
                             per_doc.push((terms.len() - before) as u32);
-                            match_phrases(plan, &ids, doc, &mut matches);
+                            match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
                         let base = base.unwrap_or(0);
                         assert!(
@@ -208,7 +338,7 @@ fn main() {
                 let (plan, next, index, phrase_docs) = (&plan, &next, &index, &phrase_docs);
                 s.spawn(move || {
                     let mut done = Vec::new();
-                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    let mut acc = Acc::default();
                     loop {
                         let k = next.fetch_add(1, Relaxed);
                         if k >= n_blocks {
@@ -223,18 +353,14 @@ fn main() {
                                 Query::Bool(first, rest) => {
                                     for ci in index {
                                         if rest.is_empty() {
-                                            ci.list(*first)
-                                                .iter()
-                                                .for_each(|&d| result.add(ci.base + d as u32));
+                                            emit(ci.set(*first), ci.base, &mut result);
                                             continue;
                                         }
-                                        a.clear();
-                                        a.extend_from_slice(ci.list(*first));
+                                        acc.start(ci.set(*first));
                                         for &(op, t) in rest {
-                                            apply(op, &a, ci.list(t), &mut b);
-                                            std::mem::swap(&mut a, &mut b);
+                                            acc.apply(op, ci.set(t));
                                         }
-                                        a.iter().for_each(|&d| result.add(ci.base + d as u32));
+                                        acc.emit(ci.base, &mut result);
                                     }
                                 }
                             }
@@ -269,20 +395,50 @@ fn counting_sort(base: u32, terms: &[u32], per_doc: &[u32], n_bool: usize) -> Ch
     for i in 0..n_bool {
         offsets[i + 1] += offsets[i];
     }
+    // Dense terms become bitmaps; their list ranges are emptied.
+    let n_docs = per_doc.len();
+    let words = n_docs.div_ceil(64);
+    let mut dense = Vec::new();
+    let mut slot = vec![u32::MAX; 0];
+    let mut sizes = vec![0u32; n_bool];
+    for b in 0..n_bool {
+        sizes[b] = offsets[b + 1] - offsets[b];
+        if sizes[b] as usize * 16 > n_docs {
+            dense.push((b as u32, (dense.len() * words) as u32));
+            sizes[b] = 0;
+        }
+    }
+    slot.resize(n_bool, u32::MAX);
+    for &(b, w) in &dense {
+        slot[b as usize] = w;
+    }
+    offsets[0] = 0;
+    for b in 0..n_bool {
+        offsets[b + 1] = offsets[b] + sizes[b];
+    }
     let mut cursor = offsets.clone();
-    let mut docs = vec![0u16; terms.len()];
+    let mut docs = vec![0u16; offsets[n_bool] as usize];
+    let mut bits = vec![0u64; dense.len() * words];
     let mut at = 0;
     for (d, &n) in per_doc.iter().enumerate() {
         for &b in &terms[at..at + n as usize] {
-            docs[cursor[b as usize] as usize] = d as u16;
-            cursor[b as usize] += 1;
+            match slot[b as usize] {
+                u32::MAX => {
+                    docs[cursor[b as usize] as usize] = d as u16;
+                    cursor[b as usize] += 1;
+                }
+                w => bits[w as usize + d / 64] |= 1 << (d % 64),
+            }
         }
         at += n as usize;
     }
     ChunkIndex {
         base,
+        words,
         offsets,
         docs,
+        dense,
+        bits,
     }
 }
 
@@ -381,23 +537,27 @@ fn plan(text: &'static [u8]) -> Plan {
     }
     Plan {
         terms: Terms::new(&ids),
-        bool_index,
+        info: (0..ids.len())
+            .map(|t| [bool_index[t], key_first[t], key_first[t + 1], 0])
+            .collect(),
         n_bool: n_bool as usize,
         queries,
         phrases,
-        key_first,
         keyed,
     }
 }
 
 /// Records (phrase, doc) for every phrase found in the document's token ids, checking
 /// each phrase only where its key term occurs.
-fn match_phrases(plan: &Plan, ids: &[u32], doc: u32, matches: &mut Vec<(u32, u32)>) {
-    for (i, &t) in ids.iter().enumerate() {
-        if t == NONE {
-            continue;
-        }
-        let (lo, hi) = (plan.key_first[t as usize], plan.key_first[t as usize + 1]);
+fn match_phrases(
+    plan: &Plan,
+    ids: &[u32],
+    keys: &[(u32, u32, u32)],
+    doc: u32,
+    matches: &mut Vec<(u32, u32)>,
+) {
+    for &(i, lo, hi) in keys {
+        let i = i as usize;
         for &(p, at) in &plan.keyed[lo as usize..hi as usize] {
             let terms = &plan.phrases[p as usize];
             if let Some(start) = i.checked_sub(at as usize) {
