@@ -117,6 +117,8 @@ fn main() {
         }
         total
     });
+    std::fs::write("/out/aggregates.txt", b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let mut overflow = overflow.into_inner().unwrap();
     overflow.sort_unstable();
     overflow.dedup();

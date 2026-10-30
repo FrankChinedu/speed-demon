@@ -207,6 +207,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
             in_degree[v as usize].fetch_add(1, Relaxed);
         });
     });
+    std::fs::write("/out/distances.txt", b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let (out, into) = (
         Adjacency::with_degrees(&out_degree),
         Adjacency::with_degrees(&in_degree),

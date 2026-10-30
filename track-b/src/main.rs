@@ -216,6 +216,8 @@ fn main() {
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let plan = plan(mmap::map(&data.join("queries.txt")));
+    std::fs::write("/out/results.txt", b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let docs = mmap::map(&data.join("docs.txt"));
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
