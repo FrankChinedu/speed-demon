@@ -48,15 +48,6 @@ fn main() {
     // Hours are stored relative to 2026-10-30T00:00Z; every timestamp is in the 72 h after 18:00.
     let base = days_from_civil(2026, 10, 30) * 24;
 
-    { // TIMING PROBE: read the whole map in parallel, nothing else
-        let sum = std::sync::atomic::AtomicU64::new(0);
-        thread::scope(|s| for part in input.chunks(input.len().div_ceil(threads)) {
-            let sum = &sum;
-            s.spawn(move || sum.fetch_add(part.chunks(64).map(|c| c[0] as u64).sum(), Relaxed));
-        });
-        std::fs::write(out.join("summary.txt"), sum.into_inner().to_string()).unwrap();
-        std::process::exit(0);
-    }
     // Many small chunks handed out on demand, so a slow core never holds up the
     // rest. Each thread still produces one result, keeping per-thread state small.
     let chunks = split_lines(input, (input.len() >> 21).max(threads));
