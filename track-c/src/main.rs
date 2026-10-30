@@ -266,6 +266,13 @@ struct Seen<'a> {
 
 impl Seen<'_> {
     #[inline]
+    fn prefetch(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            prefetch(&self.bits[(g * MAX_IDS + id as usize) / 64]);
+        }
+    }
+
+    #[inline]
     fn insert(&self, g: usize, id: u32) {
         if (id as usize) < MAX_IDS {
             let bit = g * MAX_IDS + id as usize;
@@ -283,6 +290,8 @@ impl Seen<'_> {
 
 fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
     let unmatched = (aggs.len() - 1) as u16;
+    let mut batch = [(0, 0, 0); BATCH];
+    let mut n = 0;
     let mut p = 0;
     if first {
         // The header is the first record: skip it, with the file's leading BOM.
@@ -320,12 +329,54 @@ fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names,
         a.name_bytes += (name.len() - name.escapes) as u64;
         a.note_bytes += (note.len() - note.escapes) as u64;
 
-        let len = name.end_content - name.start;
-        seen.insert(
-            g,
-            names.id(c, name.start, len, Names::hash(c, name.start, len)),
-        );
+        batch[n] = (g, name.start, name.end_content);
+        n += 1;
+        if n == BATCH {
+            intern(c, &batch, names, seen);
+            n = 0;
+        }
     }
+    intern(c, &batch[..n], names, seen);
+}
+
+/// Records per interning batch.
+const BATCH: usize = 32;
+
+/// Interns a batch of (country, name start, name end) and marks each pair seen. Every
+/// lookup is a likely cache miss into the shared tables, so they go in passes: hash
+/// and prefetch every slot, then prefetch every arena entry, then resolve the ids and
+/// prefetch their bitset words, then set the bits. The misses of one pass overlap
+/// instead of each record waiting for its own.
+fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
+    let mut hashes = [0u64; BATCH];
+    for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
+        *h = Names::hash(c, start, end - start);
+        names.prefetch_slot(*h);
+    }
+    for &h in &hashes[..batch.len()] {
+        names.prefetch_entry(h);
+    }
+    let mut ids = [0u32; BATCH];
+    for ((id, &h), &(g, start, end)) in ids.iter_mut().zip(&hashes).zip(batch) {
+        *id = names.id(c, start, end - start, h);
+        seen.prefetch(g, *id);
+    }
+    for (&id, &(g, ..)) in ids.iter().zip(batch) {
+        seen.insert(g, id);
+    }
+}
+
+/// Starts loading the cache line holding `r`. A hint only: it never faults.
+#[inline]
+fn prefetch<T>(r: &T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never faults and `r` is a valid reference anyway.
+    unsafe {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        _mm_prefetch::<_MM_HINT_T0>(r as *const T as *const i8);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = r;
 }
 
 /// Lock-free interning of raw name bytes into dense ids, shared by all threads.
@@ -365,6 +416,22 @@ impl Names {
         h.finish()
     }
 
+    /// Starts loading the slot a name with hash `h` probes first.
+    #[inline]
+    fn prefetch_slot(&self, h: u64) {
+        prefetch(&self.slots[h as usize & (NAME_SLOTS - 1)]);
+    }
+
+    /// Once the slot is cached: starts loading the arena entry it points to.
+    #[inline]
+    fn prefetch_entry(&self, h: u64) {
+        let s = self.slots[h as usize & (NAME_SLOTS - 1)].load(Relaxed);
+        if s != 0 {
+            prefetch(&self.arena[(s >> 32) as usize]);
+        }
+    }
+
+    /// The dense id of the name whose raw field bytes are `raw` and hash is `h`.
     /// The dense id of the name `c[start..start + len]`, whose hash is `h`.
     fn id(&self, c: &[u8], start: usize, len: usize, h: u64) -> u32 {
         let tag = (h >> 48) | 1; // never 0, so a filled slot is never 0
