@@ -62,6 +62,8 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     // Bytewise order of `&[u8]` is exactly the spec's endpoint order.
     let mut names: Vec<&[u8]> = parts
         .iter()
