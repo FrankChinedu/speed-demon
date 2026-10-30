@@ -5,8 +5,9 @@ Measured locally with `tools/sd.py bench` (Docker on an Apple M1 Pro, 8 vCPUs, a
 | Step | Change | Run ID | T (s) | M (MB) | K |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged (scoring box) | | 14.44 | 367 | 1.0 |
-| 1 | Rust rewrite: parallel split by quote parity (a byte is inside quotes exactly when an odd number of `"` precede it), byte-level record parser on the map, per-thread aggregates; distinct names via per-thread `HashMap<Cow<[u8]>>`, per-thread (country, name) pairs, then a single-threaded global merge | (pending push) | 0.501 | 83.0 | 5.9 |
-| 2 | Profile: interning about 80 ms, field scanning about 65 ms, single-threaded merge about 55 ms (10 threads, native). Raw field bytes identify a name value exactly (unquoted fields cannot hold `"`, and unescaping is one-to-one), so there is no unescaping for identity. One lock-free table shared by all threads hands out dense ids, and each country sets bits in a zero-initialised bitset that is never touched past the ids in use. No per-thread maps, no pairs, no merge | (pending push) | 0.272 | 25.7 | 10.1 |
+| 1 | Rust rewrite: parallel split by quote parity (a byte is inside quotes exactly when an odd number of `"` precede it), byte-level record parser on the map, per-thread aggregates; distinct names via per-thread `HashMap<Cow<[u8]>>`, per-thread (country, name) pairs, then a single-threaded global merge | local | 0.501 | 83.0 | 5.9 |
+| 2 | Profile: interning about 80 ms, field scanning about 65 ms, single-threaded merge about 55 ms (10 threads, native). Raw field bytes identify a name value exactly (unquoted fields cannot hold `"`, and unescaping is one-to-one), so there is no unescaping for identity. One lock-free table shared by all threads hands out dense ids, and each country sets bits in a zero-initialised bitset that is never touched past the ids in use. No per-thread maps, no pairs, no merge | local | 0.272 | 25.7 | 10.1 |
+| board | Same code as the step above, measured on the scoring box (commit aba13de, 12 threads, 2.5 GHz) | run-a6909ba84955 | 0.110 | 65.5 | 13.17 |
 
 ## Notes
 

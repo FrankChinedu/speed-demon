@@ -5,7 +5,8 @@ Measured locally with `tools/sd.py bench` (Docker on an Apple M1 Pro, 8 vCPUs, a
 | Step | Change | Run ID | T (s) | M (MB) | K |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged (scoring box) | | 32.05 | 228 | 1.0 |
-| 1 | Rust rewrite: mmap, one chunk per thread, compact (key, latency) records, sorted endpoint table so the group id is already the output order, parallel counting sort, three nested `select_nth_unstable` per group | (pending push) | 0.117 | 44.5 | 17.2 |
+| 1 | Rust rewrite: mmap, one chunk per thread, compact (key, latency) records, sorted endpoint table so the group id is already the output order, parallel counting sort, three nested `select_nth_unstable` per group | local | 0.117 | 44.5 | 17.2 |
+| board | Same code as the step above, measured on the scoring box (commit aba13de, 12 threads, 2.5 GHz) | run-2f8a43e19bdb | 0.070 | 62.6 | 20.77 |
 
 ## Notes
 
