@@ -24,13 +24,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
-/// A row slot holds `head + 1`, so zeroed memory is a row of empty slots (0) and the
-/// rows need no fill pass. Node ids are below n < 2^32 - 2.
-const EMPTY_SLOT: u32 = 0;
-/// In a row's last slot: the node's remaining edges are overflow list number `weight`.
-const SPILL: u32 = u32::MAX;
-/// An empty key in a distance map.
+/// Marks an unused slot in a row. Node ids are below n < 2^32 - 2.
 const EMPTY: u32 = u32::MAX;
+/// In a row's last slot: the node's remaining edges are overflow list number `weight`.
+const SPILL: u32 = u32::MAX - 1;
 
 /// Up to four (head, weight) edges of one node, in one aligned half cache line.
 #[derive(Clone, Copy)]
@@ -50,7 +47,7 @@ impl Adjacency {
     /// Empty rows sized for the given degrees; a node with more than four edges gets
     /// an overflow list and a SPILL marker in its last slot.
     fn with_degrees(degree: &[AtomicU32]) -> Adjacency {
-        let mut rows = zeroed_rows(degree.len());
+        let mut rows = vec![Row([(EMPTY, 0); 4]); degree.len()];
         let mut spill_first = vec![0u32];
         for (u, d) in degree.iter().enumerate() {
             let d = d.load(Relaxed);
@@ -68,7 +65,7 @@ impl Adjacency {
     }
 
     fn has_edges(&self, u: u32) -> bool {
-        self.rows[u as usize].0[0].0 != EMPTY_SLOT
+        self.rows[u as usize].0[0].0 != EMPTY
     }
 
     /// Calls `f(other end, weight)` for every edge of `u`.
@@ -76,7 +73,7 @@ impl Adjacency {
     fn for_each_edge(&self, u: u32, mut f: impl FnMut(u32, u32)) {
         for &(v, w) in &self.rows[u as usize].0 {
             match v {
-                EMPTY_SLOT => return,
+                EMPTY => return,
                 SPILL => {
                     let (lo, hi) = (
                         self.spill_first[w as usize],
@@ -87,7 +84,7 @@ impl Adjacency {
                     }
                     return;
                 }
-                _ => f(v - 1, w),
+                _ => f(v, w),
             }
         }
     }
@@ -138,26 +135,9 @@ impl Placer {
                     .add(adj.spill_first[last.1 as usize] as usize + slot - 3)
                     .write(e);
             } else {
-                self.rows.add(u as usize * 4 + slot).write((e.0 + 1, e.1));
+                self.rows.add(u as usize * 4 + slot).write(e);
             }
         }
-    }
-}
-
-/// `n` empty rows from a zeroed allocation: no pass writes 32 bytes per node first.
-fn zeroed_rows(n: usize) -> Vec<Row> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let layout = std::alloc::Layout::array::<Row>(n).expect("row count");
-    // SAFETY: the layout is non-zero-sized; an all-zero Row is valid (four empty
-    // slots); the allocation is owned by the Vec with exactly this layout.
-    unsafe {
-        let ptr = std::alloc::alloc_zeroed(layout) as *mut Row;
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        Vec::from_raw_parts(ptr, n, n)
     }
 }
 
@@ -225,15 +205,9 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
     let out_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
     let in_degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
     for_each_chunk(&chunks, threads, |chunk| {
-        for_each_batch(chunk, |batch| {
-            for &(u, v, _) in batch {
-                prefetch(&out_degree[u as usize]);
-                prefetch(&in_degree[v as usize]);
-            }
-            for &(u, v, _) in batch {
-                out_degree[u as usize].fetch_add(1, Relaxed);
-                in_degree[v as usize].fetch_add(1, Relaxed);
-            }
+        for_each_line(chunk, |u, v, _| {
+            out_degree[u as usize].fetch_add(1, Relaxed);
+            in_degree[v as usize].fetch_add(1, Relaxed);
         });
     });
     let mut out = Adjacency::with_degrees(&out_degree);
@@ -245,23 +219,14 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
     let (out_dst, into_dst) = (Placer::new(&mut out), Placer::new(&mut into));
     let (out_ref, into_ref) = (&out, &into);
     for_each_chunk(&chunks, threads, |chunk| {
-        for_each_batch(chunk, |batch| {
-            for &(u, v, _) in batch {
-                prefetch(&out_degree[u as usize]);
-                prefetch(&in_degree[v as usize]);
-                prefetch(&out_ref.rows[u as usize]);
-                prefetch(&into_ref.rows[v as usize]);
-            }
-            for &(u, v, w) in batch {
-                let out_slot = out_degree[u as usize].fetch_sub(1, Relaxed) as usize - 1;
-                let into_slot = in_degree[v as usize].fetch_sub(1, Relaxed) as usize - 1;
-                // SAFETY: pass 1 counted exactly these edges, so each countdown gives
-                // every edge its own slot below the node's degree, written by this
-                // thread alone.
-                unsafe {
-                    out_dst.place(out_ref, u, out_slot, (v, w));
-                    into_dst.place(into_ref, v, into_slot, (u, w));
-                }
+        for_each_line(chunk, |u, v, w| {
+            let out_slot = out_degree[u as usize].fetch_sub(1, Relaxed) as usize - 1;
+            let into_slot = in_degree[v as usize].fetch_sub(1, Relaxed) as usize - 1;
+            // SAFETY: pass 1 counted exactly these edges, so each countdown gives every
+            // edge its own slot below the node's degree, written by this thread alone.
+            unsafe {
+                out_dst.place(out_ref, u, out_slot, (v, w));
+                into_dst.place(into_ref, v, into_slot, (u, w));
             }
         });
     });
@@ -283,42 +248,17 @@ fn for_each_chunk(chunks: &[&'static [u8]], threads: usize, f: impl Fn(&'static 
     });
 }
 
-/// Lines per batch in the build passes.
-const BATCH: usize = 16;
-
-/// Calls `f` with the `(u, v, w)` of consecutive lines, up to BATCH at a time, so the
-/// caller can prefetch everything a batch touches before touching any of it: edges
-/// arrive in random order, and the misses of one batch then overlap.
+/// Calls `f(u, v, w)` for every `u v w` line.
 #[inline]
-fn for_each_batch(chunk: &[u8], mut f: impl FnMut(&[(u32, u32, u32)])) {
-    let mut batch = [(0u32, 0u32, 0u32); BATCH];
-    let (mut n, mut p) = (0, 0);
+fn for_each_line(chunk: &[u8], mut f: impl FnMut(u32, u32, u32)) {
+    let mut p = 0;
     while p < chunk.len() {
         let (u, q) = number(chunk, p);
         let (v, q) = number(chunk, q + 1);
         let (w, q) = number(chunk, q + 1);
-        batch[n] = (u as u32, v as u32, w as u32);
-        n += 1;
-        if n == BATCH {
-            f(&batch);
-            n = 0;
-        }
+        f(u as u32, v as u32, w as u32);
         p = q + 1;
     }
-    f(&batch[..n]);
-}
-
-/// Starts loading the cache line holding `r`. A hint only: it never faults.
-#[inline]
-fn prefetch<T>(r: &T) {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a prefetch never faults and `r` is a valid reference anyway.
-    unsafe {
-        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-        _mm_prefetch::<_MM_HINT_T0>(r as *const T as *const i8);
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = r;
 }
 
 /// One direction of a bidirectional search.
@@ -555,35 +495,15 @@ impl DistMap {
     }
 }
 
-/// A decimal number at `p`; returns it and the position of the byte after it (a
-/// space or a newline). Up to seven digits, which covers every node id and nearly
-/// every weight, are found and converted with word arithmetic: locate the
-/// delimiter in one 8-byte load, left-align the digits, then combine pairs, quads
-/// and octets by multiplication. Longer numbers take the byte loop.
+/// A decimal number at `p`; returns it and the position of the byte after it.
 #[inline]
-fn number(c: &[u8], p: usize) -> (u64, usize) {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    let w = match c.get(p..p + 8) {
-        Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
-        None => 0x2020_2020_2020_2020, // near the end: no delimiter here, take the loop
-    };
-    let zero = |x: u64| x.wrapping_sub(ONES) & !x & (ONES << 7);
-    let n = (zero(w ^ 0x2020_2020_2020_2020) | zero(w ^ 0x0a0a_0a0a_0a0a_0a0a)).trailing_zeros()
-        as usize
-        / 8;
-    if (1..8).contains(&n) {
-        let digits = (w << (8 * (8 - n))) & 0x0f0f_0f0f_0f0f_0f0f;
-        let v = digits.wrapping_mul(10 * (1 << 8) + 1) >> 8 & 0x00ff_00ff_00ff_00ff;
-        let v = v.wrapping_mul(100 * (1 << 16) + 1) >> 16 & 0x0000_ffff_0000_ffff;
-        return (v.wrapping_mul(10000 * (1 << 32) + 1) >> 32, p + n);
-    }
+fn number(c: &[u8], mut p: usize) -> (u64, usize) {
     let mut v = 0u64;
-    let mut q = p;
-    while let Some(&b) = c.get(q).filter(|b| b.is_ascii_digit()) {
+    while let Some(&b) = c.get(p).filter(|b| b.is_ascii_digit()) {
         v = v * 10 + (b - b'0') as u64;
-        q += 1;
+        p += 1;
     }
-    (v, q)
+    (v, p)
 }
 
 fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
