@@ -285,6 +285,9 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
+    std::hint::black_box(&indexed);
+    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed

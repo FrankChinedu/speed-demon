@@ -278,9 +278,25 @@ fn parse(
             // The method starts at byte 28 and is at most 7 bytes, so the space after it
             // is in the next word: no branch on which method it is.
             let ep_start = 29 + first_byte(word(line, 28), SPACES);
-            let (len, h) = endpoint(&line[ep_start..]);
-            let ep_end = ep_start + len;
-            let id = table.id(&line[ep_start..ep_end], h);
+            // Find the space after the endpoint eight bytes at a time, hashing each word
+            // on the way, so the endpoint is scanned once for both jobs.
+            let (mut k, mut h) = (ep_start, 0u64);
+            let ep_end = loop {
+                let w = word(line, k);
+                let x = w ^ SPACES;
+                let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
+                if spaces != 0 {
+                    let n = spaces.trailing_zeros() as usize / 8;
+                    h = mix(h, w & ((1u64 << (n * 8)) - 1));
+                    break k + n;
+                }
+                h = mix(h, w);
+                k += 8;
+            };
+            let id = table.id(
+                &line[ep_start..ep_end],
+                fmix(h ^ (ep_end - ep_start) as u64) | 1,
+            );
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -357,115 +373,6 @@ fn latency(line: &[u8], p: usize) -> (u32, usize) {
         j += 1;
     }
     (v, j)
-}
-
-/// Bytes 0xFF then 0x00: the word at `KEEP[64 - len + 8 * k..]` keeps the part of
-/// word k of a 64-byte window that lies inside the first `len` bytes.
-static KEEP: [u8; 128] = {
-    let mut keep = [0; 128];
-    let mut i = 0;
-    while i < 64 {
-        keep[i] = 0xff;
-        i += 1;
-    }
-    keep
-};
-
-/// Odd constants with the high bit set in every byte, so that no ASCII word, and no
-/// zero word, cancels one.
-const SEEDS: [u64; 8] = [
-    0xa0761d6478bd642f,
-    0xe7037ed1a0b428db,
-    0x8ebc6af09c88c6e3,
-    0x9b1bd8f2dd6e9a85,
-    0xc5e3a1f7b2d4e6f9,
-    0xf1b3c5d7e9a2b4c7,
-    0xd3e5f7a9cbaddcf1,
-    0xb7c9dbedff8193a5,
-];
-
-/// The length and 64-bit hash of the endpoint at the start of `s`, which a space ends.
-/// Endpoints under 64 bytes (94% of lines) take no data-dependent branch: one mask
-/// of the spaces in the next 64 bytes gives the length, and the hash folds all
-/// eight words, masked to the name, with four independent 128-bit multiplies.
-/// The hash is a function of the name's bytes alone, whichever path computes it.
-#[inline]
-fn endpoint(s: &[u8]) -> (usize, u64) {
-    let Some(window) = s.first_chunk::<64>() else {
-        // Within 64 bytes of the chunk's end: the same, from a space-padded copy.
-        let mut padded = [b' '; 64];
-        let n = s.len().min(64);
-        padded[..n].copy_from_slice(&s[..n]);
-        return match space_mask(&padded).trailing_zeros() as usize {
-            len if len < n => (len, short_hash(&padded, len)),
-            _ => long_endpoint(s),
-        };
-    };
-    match space_mask(window).trailing_zeros() as usize {
-        64 => long_endpoint(s),
-        len => (len, short_hash(window, len)),
-    }
-}
-
-#[inline]
-fn short_hash(window: &[u8; 64], len: usize) -> u64 {
-    let word = |k: usize| {
-        let at = 8 * k;
-        let w = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
-        let keep = u64::from_le_bytes(KEEP[64 - len + at..][..8].try_into().unwrap());
-        (w & keep) ^ SEEDS[k]
-    };
-    let h = (0..4).fold(0, |h, k| {
-        let p = word(2 * k) as u128 * word(2 * k + 1) as u128;
-        h ^ p as u64 ^ (p >> 64) as u64
-    });
-    fmix(h ^ len as u64) | 1
-}
-
-/// Endpoints of 64 bytes and more: eight bytes at a time.
-#[cold]
-fn long_endpoint(s: &[u8]) -> (usize, u64) {
-    let (mut k, mut h) = (0, 0u64);
-    loop {
-        let w = word(s, k);
-        let n = first_byte(w, SPACES);
-        if n < 8 {
-            h = mix(h, w & ((1u64 << (n * 8)) - 1));
-            return (k + n, fmix(h ^ (k + n) as u64) | 1);
-        }
-        h = mix(h, w);
-        k += 8;
-    }
-}
-
-/// Bit i is set where byte i of the window is a space.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline]
-fn space_mask(window: &[u8; 64]) -> u64 {
-    use std::arch::x86_64::*;
-    // SAFETY: AVX2 is enabled at compile time (the cfg above), and both unaligned
-    // 32-byte loads are inside the 64-byte array.
-    unsafe {
-        let sp = _mm256_set1_epi8(b' ' as i8);
-        let half = |at: usize| {
-            let v = _mm256_loadu_si256(window.as_ptr().add(at).cast());
-            _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, sp)) as u32 as u64
-        };
-        half(0) | half(32) << 32
-    }
-}
-
-/// Bit i is set where byte i of the window is a space (or, harmlessly, at some
-/// bytes after the first space: only the lowest set bit is ever used).
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-#[inline]
-fn space_mask(window: &[u8; 64]) -> u64 {
-    (0..8).fold(0, |m, k| {
-        let x = u64::from_le_bytes(window[8 * k..8 * k + 8].try_into().unwrap()) ^ SPACES;
-        let high = x.wrapping_sub(ONES) & !x & HIGHS;
-        // Gather the eight high bits into one byte.
-        m | (high.wrapping_mul(0x0002_0408_1020_4081) >> 56) << (8 * k)
-    })
 }
 
 #[inline]
