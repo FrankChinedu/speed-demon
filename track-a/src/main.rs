@@ -32,7 +32,7 @@ const MAX_ENDPOINTS: usize = 1 << (32 - LAT_BITS);
 /// Records are kept in 256 KB blocks: above malloc's mmap threshold, so each block
 /// is its own mapping, charged only for the pages written and returned to the
 /// system when freed, instead of staying in a malloc arena.
-const BLOCK: usize = 1 << 16;
+const BLOCK: usize = 1 << 10;
 
 /// One thread's lines of one hour.
 #[derive(Default)]
