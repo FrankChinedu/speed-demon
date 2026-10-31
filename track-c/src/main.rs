@@ -331,7 +331,7 @@ fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen)
         seen.prefetch(g, *id);
     }
     for (&id, &(g, ..)) in ids.iter().zip(batch) {
-        std::hint::black_box((seen, g, id)); // TIMING PROBE: no bitset writes
+        seen.insert(g, id);
     }
 }
 
