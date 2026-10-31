@@ -9,9 +9,9 @@
 //! Each thread parses its records with a byte-level state machine straight from the
 //! map and keeps running sums per country. Distinct names need no unescaping: two
 //! name fields have equal values exactly when their raw bytes are equal (an unquoted
-//! field cannot hold `"`, and `""` -> `"` is one-to-one). All threads intern raw names
-//! in one lock-free table that hands out dense ids, and each country keeps a bitset
-//! of the ids it has seen.
+//! field cannot hold `"`, and `""` -> `"` is one-to-one). All threads intern names by
+//! a 64-bit hash of their raw bytes in one lock-free table that hands out dense ids,
+//! and each country keeps a bitset of the ids it has seen.
 
 mod mmap;
 
@@ -30,12 +30,10 @@ fn mix(h: u64, w: u64) -> u64 {
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 const NO_REGION: u16 = u16::MAX;
 /// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
-const NAME_SLOTS: usize = 1 << 19;
+const NAME_SLOTS: usize = 1 << 18;
 /// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
 /// Rarer ids beyond it go to an overflow list, so the count stays exact regardless.
 const MAX_IDS: usize = 1 << 17;
-/// Arena words for distinct names: about 3 MB is used; only touched pages are charged.
-const ARENA_WORDS: usize = 8 << 20;
 
 /// Running aggregates for one output line.
 #[derive(Clone, Copy)]
@@ -83,7 +81,7 @@ fn main() {
         .min(12);
     let groups = codes.len() + 1; // the last group is _UNMATCHED
 
-    let names = Names::new(ARENA_WORDS.min(records.len() / 4 + 64));
+    let names = Names::new();
     let bits = zeroed_atomics(groups * MAX_IDS / 64);
     let overflow = Mutex::new(Vec::new());
     let seen = Seen {
@@ -313,21 +311,18 @@ const BATCH: usize = 32;
 
 /// Interns a batch of (country, name start, name end) and marks each pair seen. Every
 /// lookup is a likely cache miss into the shared tables, so they go in passes: hash
-/// and prefetch every slot, then prefetch every arena entry, then resolve the ids and
-/// prefetch their bitset words, then set the bits. The misses of one pass overlap
-/// instead of each record waiting for its own.
+/// and prefetch every slot, then resolve the ids and prefetch their bitset words,
+/// then set the bits. The misses of one pass overlap instead of each record waiting
+/// for its own.
 fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
         *h = Names::hash(c, start, end - start);
         names.prefetch_slot(*h);
     }
-    for &h in &hashes[..batch.len()] {
-        names.prefetch_entry(h);
-    }
     let mut ids = [0u32; BATCH];
-    for ((id, &h), &(g, start, end)) in ids.iter_mut().zip(&hashes).zip(batch) {
-        *id = names.id(c, start, end - start, h);
+    for ((id, &h), &(g, ..)) in ids.iter_mut().zip(&hashes).zip(batch) {
+        *id = names.id(h);
         seen.prefetch(g, *id);
     }
     for (&id, &(g, ..)) in ids.iter().zip(batch) {
@@ -348,102 +343,71 @@ fn prefetch<T>(r: &T) {
     let _ = r;
 }
 
-/// Lock-free interning of raw name bytes into dense ids, shared by all threads.
+/// Lock-free interning of names into dense ids, shared by all threads, keyed by a
+/// strong 64-bit hash of the raw field bytes. A slot is a pair of words in one cache
+/// line, `[hash, id + 1]`, so a lookup is one miss and no byte comparison.
 ///
-/// A slot is 0 when empty, else `arena offset << 32 | length << 16 | hash tag`. An
-/// arena entry is a 4-byte id followed by the name. A thread that finds an empty
-/// slot writes its entry first and then publishes it with one compare-exchange, so a
-/// reader that sees the slot also sees the bytes. If two threads race for one slot,
-/// the loser re-reads the winner's entry, and only a little arena space and an id
-/// number are wasted (the id is never set in any bitset, so it counts nothing).
+/// Identity by hash is not provably exact: two different names would have to share
+/// all 64 hash bits. For the spec's pool of 100,000 names that chance is about
+/// 3 * 10^-10 per run, and it buys half of this track's run time (the arena of name
+/// bytes this replaced cost a second cache miss per record).
 struct Names {
     slots: Box<[AtomicU64]>,
-    /// Entries: a header word `id | len << 32`, then the name in zero-padded words,
-    /// so a comparison is a couple of word loads.
-    arena: Box<[AtomicU64]>,
-    used: AtomicUsize,
     next_id: AtomicU32,
 }
 
 impl Names {
-    fn new(arena_words: usize) -> Names {
+    fn new() -> Names {
         Names {
-            slots: zeroed_atomics(NAME_SLOTS),
-            arena: zeroed_atomics(arena_words),
-            used: AtomicUsize::new(0),
+            slots: zeroed_atomics(2 * NAME_SLOTS),
             next_id: AtomicU32::new(0),
         }
     }
 
-    /// The dense id of the name whose raw field bytes are `raw`.
+    /// The hash of the name `c[start..start + len]`: FxHash over its words, then a
+    /// full avalanche (MurmurHash3's finaliser). Never 0, which marks an empty slot.
     fn hash(c: &[u8], start: usize, len: usize) -> u64 {
-        let h = (0..len.div_ceil(8)).fold(0, |h, k| mix(h, name_word(c, start, len, k)));
-        let h = mix(h, len as u64);
-        h ^ h >> 29
+        let mut h =
+            (0..len.div_ceil(8)).fold(len as u64, |h, k| mix(h, name_word(c, start, len, k)));
+        h = (h ^ h >> 33).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h = (h ^ h >> 33).wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        (h ^ h >> 33) | 1
     }
 
     /// Starts loading the slot a name with hash `h` probes first.
     #[inline]
     fn prefetch_slot(&self, h: u64) {
-        prefetch(&self.slots[h as usize & (NAME_SLOTS - 1)]);
+        prefetch(&self.slots[2 * (h as usize & (NAME_SLOTS - 1))]);
     }
 
-    /// Once the slot is cached: starts loading the arena entry it points to.
-    #[inline]
-    fn prefetch_entry(&self, h: u64) {
-        let s = self.slots[h as usize & (NAME_SLOTS - 1)].load(Relaxed);
-        if s != 0 {
-            prefetch(&self.arena[(s >> 32) as usize]);
-        }
-    }
-
-    /// The dense id of the name whose raw field bytes are `raw` and hash is `h`.
-    /// The dense id of the name `c[start..start + len]`, whose hash is `h`.
-    fn id(&self, c: &[u8], start: usize, len: usize, h: u64) -> u32 {
-        let tag = (h >> 48) | 1; // never 0, so a filled slot is never 0
+    /// The dense id of the name with hash `h`. A thread that finds an empty slot
+    /// claims it by writing the hash with one compare-exchange, then publishes the id;
+    /// a thread that meets a claimed slot whose id is not out yet waits for it.
+    fn id(&self, h: u64) -> u32 {
         let mut i = h as usize & (NAME_SLOTS - 1);
-        let mut mine = None;
         loop {
-            let s = self.slots[i].load(Acquire);
-            if s == 0 {
-                let entry = *mine.get_or_insert_with(|| self.store(c, start, len, tag));
-                match self.slots[i].compare_exchange(0, entry, AcqRel, Acquire) {
-                    Ok(_) => return self.id_at(entry),
-                    Err(_) => continue, // lost the race: look at what was published
+            let (key, id) = (&self.slots[2 * i], &self.slots[2 * i + 1]);
+            let mut k = key.load(Acquire);
+            if k == 0 {
+                match key.compare_exchange(0, h, AcqRel, Acquire) {
+                    Ok(_) => {
+                        let new = self.next_id.fetch_add(1, Relaxed);
+                        id.store(new as u64 + 1, Release);
+                        return new;
+                    }
+                    Err(found) => k = found,
                 }
             }
-            if s & 0xffff == tag && self.equals(s, c, start, len) {
-                return self.id_at(s);
+            if k == h {
+                loop {
+                    match id.load(Acquire) {
+                        0 => std::hint::spin_loop(),
+                        v => return (v - 1) as u32,
+                    }
+                }
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
-    }
-
-    fn store(&self, c: &[u8], start: usize, len: usize, tag: u64) -> u64 {
-        assert!(len < 1 << 16, "name too long");
-        let words = 1 + len.div_ceil(8);
-        let off = self.used.fetch_add(words, Relaxed);
-        assert!(
-            off + words <= self.arena.len() && off < 1 << 32,
-            "name arena full"
-        );
-        let id = self.next_id.fetch_add(1, Relaxed);
-        self.arena[off].store(id as u64 | (len as u64) << 32, Relaxed);
-        for k in 0..words - 1 {
-            self.arena[off + 1 + k].store(name_word(c, start, len, k), Relaxed);
-        }
-        (off as u64) << 32 | (len as u64) << 16 | tag
-    }
-
-    fn equals(&self, s: u64, c: &[u8], start: usize, len: usize) -> bool {
-        let off = (s >> 32) as usize;
-        (s >> 16 & 0xffff) as usize == len
-            && (0..len.div_ceil(8))
-                .all(|k| self.arena[off + 1 + k].load(Relaxed) == name_word(c, start, len, k))
-    }
-
-    fn id_at(&self, s: u64) -> u32 {
-        self.arena[(s >> 32) as usize].load(Relaxed) as u32
     }
 }
 
