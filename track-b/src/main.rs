@@ -217,10 +217,9 @@ fn main() {
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    // Eight chunks per thread, so the last round is not left half empty and each
-    // thread's posting buffers stay small; at most ~4 MB each (~4,000 documents),
-    // well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 8).max(docs.len() >> 22));
+    // Four chunks per thread, so the last round is not left half empty; at most
+    // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
+    let chunks = split_lines(docs, (threads * 4).max(docs.len() >> 23));
 
     // The single pass over the corpus. Chunks are handed out dynamically.
     let next = AtomicUsize::new(0);
@@ -242,8 +241,6 @@ fn main() {
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
                             .saturating_sub(GROUPS.ilog2()),
-                        slot: vec![u32::MAX; plan.n_bool],
-                        cursor: vec![0; plan.n_bool],
                     };
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
@@ -371,8 +368,6 @@ struct Postings {
     groups: Vec<Vec<u32>>,
     count: Vec<u32>,
     shift: u32,
-    slot: Vec<u32>,
-    cursor: Vec<u32>,
 }
 
 impl Postings {
@@ -385,21 +380,20 @@ impl Postings {
         // empty list range.
         let mut offsets = vec![0u32; n_bool + 1];
         let mut dense = Vec::new();
-        let (slot, cursor) = (&mut self.slot, &mut self.cursor);
+        let mut slot = vec![u32::MAX; n_bool];
         let mut total = 0;
         for (b, c) in self.count.iter_mut().enumerate() {
             offsets[b] = total;
-            cursor[b] = total;
             if *c as usize * 16 > n_docs {
                 slot[b] = (dense.len() * words) as u32;
                 dense.push((b as u32, slot[b]));
             } else {
-                slot[b] = u32::MAX;
                 total += *c;
             }
             *c = 0;
         }
         offsets[n_bool] = total;
+        let mut cursor = offsets.clone();
         let mut docs = vec![0u16; total as usize];
         let mut bits = vec![0u64; dense.len() * words];
         for group in &mut self.groups {
