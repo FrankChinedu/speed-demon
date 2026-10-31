@@ -232,20 +232,26 @@ fn main() {
                     let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
                     let mut scratch = Scratch::default();
-                    // Each document's distinct BOOL terms, back to back (as 16-bit indices:
-                    // there are at most 65,536 BOOL terms), reused chunk after chunk.
-                    let mut terms: Vec<u16> = Vec::new();
+                    // The chunk's postings, `doc offset << 16 | BOOL index` (there are at
+                    // most 65,536 BOOL terms), split by term range; and each term's count.
+                    let mut postings = Postings {
+                        groups: vec![Vec::new(); GROUPS],
+                        count: vec![0; plan.n_bool],
+                        shift: (plan.n_bool.max(1) - 1)
+                            .checked_ilog2()
+                            .map_or(0, |b| b + 1)
+                            .saturating_sub(GROUPS.ilog2()),
+                    };
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
-                        terms.clear();
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
-                        let mut per_doc: Vec<u32> = Vec::new();
-                        let mut matches: Vec<(u32, u32)> = Vec::new();
+                        let mut n_docs = 0;
+                        let mut matches = Vec::new();
                         let mut base = None;
                         for_each_doc(chunk, |doc, text| {
-                            base.get_or_insert(doc);
+                            let offset = doc - *base.get_or_insert(doc);
+                            n_docs += 1;
                             ids.clear();
                             keys.clear();
-                            let before = terms.len();
                             tokenize(text, &plan.terms, &mut scratch, &mut ids);
                             // Each token's BOOL posting (once per document) and whether a
                             // phrase is keyed on it, from its slot; then the slot index
@@ -256,21 +262,19 @@ fn main() {
                                 *t = s.id;
                                 if b != NONE && last[b as usize] != doc {
                                     last[b as usize] = doc;
-                                    terms.push(b as u16);
+                                    postings.count[b as usize] += 1;
+                                    postings.groups[b as usize >> postings.shift]
+                                        .push(offset << 16 | b);
                                 }
                                 if key_lo != key_hi {
                                     keys.push((i as u32, key_lo, key_hi));
                                 }
                             }
-                            per_doc.push((terms.len() - before) as u32);
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
                         let base = base.unwrap_or(0);
-                        assert!(
-                            per_doc.len() <= 1 << 16,
-                            "chunk too large for 16-bit offsets"
-                        );
-                        std::hint::black_box((base, &per_doc, &mut matches)); // TIMING PROBE: no sort
+                        assert!(n_docs <= 1 << 16, "chunk too large for 16-bit offsets");
+                        done.push((base as usize, postings.index(base, n_docs), matches));
                     }
                     done
                 })
@@ -281,9 +285,6 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    std::hint::black_box(&indexed);
-    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed
@@ -357,60 +358,65 @@ fn main() {
     }
 }
 
-/// Groups a chunk's per-document BOOL terms by term. Documents are visited in order,
-/// so every list comes out ascending.
-fn counting_sort(base: u32, terms: &[u16], per_doc: &[u32], n_bool: usize) -> ChunkIndex {
-    let mut offsets = vec![0u32; n_bool + 1];
-    for &b in terms {
-        offsets[b as usize + 1] += 1;
-    }
-    for i in 0..n_bool {
-        offsets[i + 1] += offsets[i];
-    }
-    // Dense terms become bitmaps; their list ranges are emptied.
-    let n_docs = per_doc.len();
-    let words = n_docs.div_ceil(64);
-    let mut dense = Vec::new();
-    let mut slot = vec![u32::MAX; 0];
-    let mut sizes = vec![0u32; n_bool];
-    for b in 0..n_bool {
-        sizes[b] = offsets[b + 1] - offsets[b];
-        if sizes[b] as usize * 16 > n_docs {
-            dense.push((b as u32, (dense.len() * words) as u32));
-            sizes[b] = 0;
-        }
-    }
-    slot.resize(n_bool, u32::MAX);
-    for &(b, w) in &dense {
-        slot[b as usize] = w;
-    }
-    offsets[0] = 0;
-    for b in 0..n_bool {
-        offsets[b + 1] = offsets[b] + sizes[b];
-    }
-    let mut cursor = offsets.clone();
-    let mut docs = vec![0u16; offsets[n_bool] as usize];
-    let mut bits = vec![0u64; dense.len() * words];
-    let mut at = 0;
-    for (d, &n) in per_doc.iter().enumerate() {
-        for &b in &terms[at..at + n as usize] {
-            match slot[b as usize] {
-                u32::MAX => {
-                    docs[cursor[b as usize] as usize] = d as u16;
-                    cursor[b as usize] += 1;
-                }
-                w => bits[w as usize + d / 64] |= 1 << (d % 64),
+/// Term ranges the postings are split into while they are collected.
+const GROUPS: usize = 64;
+
+/// One thread's postings for the chunk it is reading, kept by term range: scattering
+/// them into per-term lists then touches one range's lists at a time, a few KB that
+/// stay in cache, instead of all ~50,000 lists at once.
+struct Postings {
+    groups: Vec<Vec<u32>>,
+    count: Vec<u32>,
+    shift: u32,
+}
+
+impl Postings {
+    /// Turns the chunk's postings into its index and empties the buffers. Documents
+    /// were visited in order, so every list comes out ascending.
+    fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
+        let n_bool = self.count.len();
+        let words = n_docs.div_ceil(64);
+        // Dense terms (in more than 1/16 of the documents) become bitmaps and get an
+        // empty list range.
+        let mut offsets = vec![0u32; n_bool + 1];
+        let mut dense = Vec::new();
+        let mut slot = vec![u32::MAX; n_bool];
+        let mut total = 0;
+        for (b, c) in self.count.iter_mut().enumerate() {
+            offsets[b] = total;
+            if *c as usize * 16 > n_docs {
+                slot[b] = (dense.len() * words) as u32;
+                dense.push((b as u32, slot[b]));
+            } else {
+                total += *c;
             }
+            *c = 0;
         }
-        at += n as usize;
-    }
-    ChunkIndex {
-        base,
-        words,
-        offsets,
-        docs,
-        dense,
-        bits,
+        offsets[n_bool] = total;
+        let mut cursor = offsets.clone();
+        let mut docs = vec![0u16; total as usize];
+        let mut bits = vec![0u64; dense.len() * words];
+        for group in &mut self.groups {
+            for &p in group.iter() {
+                let (d, b) = ((p >> 16) as usize, (p & 0xffff) as usize);
+                match slot[b] {
+                    u32::MAX => {
+                        docs[cursor[b] as usize] = d as u16;
+                        cursor[b] += 1;
+                    }
+                    w => bits[w as usize + d / 64] |= 1 << (d % 64),
+                }
+            }
+            group.clear();
+        }
+        ChunkIndex {
+            base,
+            words,
+            offsets,
+            docs,
+            dense,
+            bits,
+        }
     }
 }
 
