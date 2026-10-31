@@ -59,9 +59,6 @@ enum Query {
 /// Everything known from queries.txt before the corpus is read.
 struct Plan {
     terms: Terms,
-    /// Per term id: [dense BOOL index or NONE, key range start, key range end, 0].
-    /// One aligned 16-byte record, so a token costs one cache line, not three.
-    info: Vec<[u32; 4]>,
     n_bool: usize,
     queries: Vec<Query>,
     phrases: Vec<Vec<u32>>,
@@ -250,13 +247,13 @@ fn main() {
                             keys.clear();
                             let before = terms.len();
                             tokenize(text, &plan.terms, &mut scratch, &mut ids);
-                            ids.iter()
-                                .filter(|&&t| t != NONE)
-                                .for_each(|&t| prefetch(&plan.info[t as usize]));
                             // Each token's BOOL posting (once per document) and whether a
-                            // phrase is keyed on it, from the term's 16-byte info record.
-                            for (i, &t) in ids.iter().enumerate().filter(|&(_, &t)| t != NONE) {
-                                let [b, key_lo, key_hi, _] = plan.info[t as usize];
+                            // phrase is keyed on it, from its slot; then the slot index
+                            // becomes the term id the phrase check compares.
+                            for (i, t) in ids.iter_mut().enumerate().filter(|(_, t)| **t != NONE) {
+                                let s = &plan.terms.slots[*t as usize];
+                                let (b, key_lo, key_hi) = (s.bool_index, s.key_lo, s.key_hi);
+                                *t = s.id;
                                 if b != NONE && last[b as usize] != doc {
                                     last[b as usize] = doc;
                                     terms.push(b as u16);
@@ -461,7 +458,7 @@ fn plan(text: &'static [u8]) -> Plan {
     }
 
     // BOOL terms get dense indices so each chunk's offset table only covers them.
-    let n_terms = terms.keys.len();
+    let n_terms = terms.count as usize;
     let mut bool_index = vec![NONE; n_terms];
     let mut n_bool = 0;
     let mut dense = |t: u32| {
@@ -518,11 +515,12 @@ fn plan(text: &'static [u8]) -> Plan {
         keyed[cursor[t as usize] as usize] = (p, at);
         cursor[t as usize] += 1;
     }
+    for s in terms.slots.iter_mut().filter(|s| s.hash != 0) {
+        let t = s.id as usize;
+        (s.bool_index, s.key_lo, s.key_hi) = (bool_index[t], key_first[t], key_first[t + 1]);
+    }
     Plan {
         terms,
-        info: (0..n_terms)
-            .map(|t| [bool_index[t], key_first[t], key_first[t + 1], 0])
-            .collect(),
         n_bool: {
             assert!(n_bool <= 1 << 16, "BOOL term indices are 16-bit");
             n_bool as usize
@@ -580,26 +578,35 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
 /// are a few word operations instead of a byte loop and a `memcmp` through a pointer.
 type Key = [u64; 4];
 
-/// Open-addressing table from query terms to ids, built once, read by every thread.
-/// Each slot packs a 32-bit hash tag with `id + 1`, so a miss is decided from the
-/// slot array alone without touching any key. In front of it, a 128 KB bit filter
-/// (two bits per term) that stays in L2: most corpus tokens are not query terms, and
-/// the filter turns their lookup from a cache miss into the table into a cached test.
+/// Everything a corpus token needs, in one 32-byte slot: the term's hash, its id, its
+/// dense BOOL index (or NONE) and the range of phrases keyed on it.
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(32))]
+struct Slot {
+    hash: u64,
+    id: u32,
+    bool_index: u32,
+    key_lo: u32,
+    key_hi: u32,
+}
+
+/// Open-addressing table from query terms to their slots, built once, read by every
+/// thread. Terms are identified by a strong 64-bit hash of their bytes, so a lookup
+/// is one cache miss with no key comparison. (A corpus token would have to share all
+/// 64 bits with a query term to be mistaken for it: about 4 * 10^-9 per run for the
+/// spec's 600,000 distinct tokens and 110,000 query terms.) In front of it, a 128 KB
+/// bit filter (two bits per term) that stays in L2: most corpus tokens are not query
+/// terms, and the filter turns their lookup into a cached test.
 struct Terms {
     mask: usize,
-    slots: Vec<u64>,
-    keys: Vec<Key>,
+    slots: Vec<Slot>,
+    count: u32,
     filter: Vec<u64>,
 }
 
 impl Default for Terms {
     fn default() -> Self {
-        Terms {
-            mask: (1 << 16) - 1,
-            slots: vec![0; 1 << 16],
-            keys: Vec::new(),
-            filter: vec![0; 1 << (FILTER_BITS - 6)],
-        }
+        Terms::with_capacity(1 << 16)
     }
 }
 
@@ -614,47 +621,47 @@ fn filter_bits(h: u64) -> (usize, usize) {
 }
 
 impl Terms {
+    fn with_capacity(cap: usize) -> Terms {
+        Terms {
+            mask: cap - 1,
+            slots: vec![Slot::default(); cap],
+            count: 0,
+            filter: vec![0; 1 << (FILTER_BITS - 6)],
+        }
+    }
+
     /// The id of `key`, adding it if it is new. Grows at half full.
     fn insert(&mut self, key: Key) -> u32 {
-        let found = self.get(&key);
-        if found != NONE {
-            return found;
+        let h = hash(&key);
+        if let Some(i) = self.find(h) {
+            return self.slots[i].id;
         }
-        if (self.keys.len() + 1) * 2 > self.slots.len() {
-            let old = std::mem::take(&mut self.keys);
-            *self = Terms {
-                mask: self.slots.len() * 2 - 1,
-                slots: vec![0; self.slots.len() * 2],
-                ..Terms::default()
-            };
-            for k in old {
-                self.add(k);
+        if (self.count as usize + 1) * 2 > self.slots.len() {
+            let old = std::mem::replace(self, Terms::with_capacity(self.slots.len() * 2));
+            self.count = old.count;
+            for s in old.slots.into_iter().filter(|s| s.hash != 0) {
+                self.place(s);
             }
         }
-        self.add(key)
+        self.place(Slot {
+            hash: h,
+            id: self.count,
+            bool_index: NONE,
+            ..Slot::default()
+        });
+        self.count += 1;
+        self.count - 1
     }
 
-    fn add(&mut self, key: Key) -> u32 {
-        let (h, id) = (hash(&key), self.keys.len() as u32);
-        let mut i = h as usize & self.mask;
-        while self.slots[i] != 0 {
+    fn place(&mut self, slot: Slot) {
+        let mut i = slot.hash as usize & self.mask;
+        while self.slots[i].hash != 0 {
             i = (i + 1) & self.mask;
         }
-        self.slots[i] = (h >> 32) << 32 | (id as u64 + 1);
-        self.keys.push(key);
-        let (a, b) = filter_bits(h);
+        self.slots[i] = slot;
+        let (a, b) = filter_bits(slot.hash);
         self.filter[a / 64] |= 1 << (a % 64);
         self.filter[b / 64] |= 1 << (b % 64);
-        id
-    }
-
-    #[inline]
-    fn get(&self, key: &Key) -> u32 {
-        let h = hash(key);
-        if self.filtered_out(h) {
-            return NONE;
-        }
-        self.probe(key, h)
     }
 
     #[inline]
@@ -663,67 +670,63 @@ impl Terms {
         self.filter[a / 64] >> (a % 64) & self.filter[b / 64] >> (b % 64) & 1 == 0
     }
 
+    /// The slot index of the term with hash `h`, if it is a query term.
     #[inline]
-    fn probe(&self, key: &Key, h: u64) -> u32 {
+    fn find(&self, h: u64) -> Option<usize> {
         let mut i = h as usize & self.mask;
         loop {
-            let s = self.slots[i];
-            if s == 0 {
-                return NONE;
+            match self.slots[i].hash {
+                0 => return None,
+                x if x == h => return Some(i),
+                _ => i = (i + 1) & self.mask,
             }
-            let id = (s as u32).wrapping_sub(1);
-            if s >> 32 == h >> 32 && self.keys[id as usize] == *key {
-                return id;
-            }
-            i = (i + 1) & self.mask;
         }
     }
 }
 
+/// A strong 64-bit hash of a token's key: a multiply-xor of its words, then a full
+/// avalanche (MurmurHash3's finaliser). Never 0, which marks an empty slot.
 #[inline]
 fn hash(k: &Key) -> u64 {
-    let h = (k[0].wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    let mut h = (k[0].wrapping_mul(0x9e37_79b9_7f4a_7c15)
         ^ k[1].rotate_left(23).wrapping_mul(0xc2b2_ae3d_27d4_eb4f))
         ^ (k[2] ^ k[3].rotate_left(41)).wrapping_mul(0x1656_67b1_9e37_79f9);
-    h ^ h >> 29
+    h = (h ^ h >> 33).wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h = (h ^ h >> 33).wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    (h ^ h >> 33) | 1
 }
 
-/// Fills `ids` with the term id (or NONE) of every token of `text`, in order.
+/// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order.
 ///
 /// A token is a maximal run of `[A-Za-z0-9]`. First every byte is classified into a
 /// bitmask (64 bytes per word), then tokens are walked with trailing-zero counts, so
 /// the only unpredictable branch is once per token rather than once per byte.
 ///
 /// The term table does not fit in L2, so the lookups for a whole document go in
-/// stages: key, hash and slot prefetch for every token, then the probes. The misses
-/// of one stage overlap instead of each token waiting for its own.
-fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, ids: &mut Vec<u32>) {
+/// stages: hash and slot prefetch for every token, then the probes. The misses of
+/// one stage overlap instead of each token waiting for its own.
+fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, slots: &mut Vec<u32>) {
     token_mask(text, &mut scratch.mask);
-    scratch.tokens.clear();
+    scratch.hashes.clear();
     let mut i = 0;
     while let Some(start) = next_bit(&scratch.mask, i, 0) {
         let end = next_bit(&scratch.mask, start, !0).unwrap_or(text.len());
-        let (key, mut h) = ([0; 4], 0);
+        let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
-            let key = key_at(text, start, end - start);
-            h = hash(&key);
-            if !terms.filtered_out(h) {
+            h = hash(&key_at(text, start, end - start));
+            if terms.filtered_out(h) {
+                h = 0;
+            } else {
                 prefetch(&terms.slots[h as usize & terms.mask]);
-                scratch.tokens.push((key, h));
-                i = end;
-                continue;
             }
         }
-        scratch.tokens.push((key, h)); // h == 0 never reaches the table below
+        scratch.hashes.push(h);
         i = end;
     }
-    ids.clear();
-    ids.extend(scratch.tokens.iter().map(|(key, h)| {
-        if *h == 0 || terms.filtered_out(*h) {
-            NONE
-        } else {
-            terms.probe(key, *h)
-        }
+    slots.clear();
+    slots.extend(scratch.hashes.iter().map(|&h| match h {
+        0 => NONE,
+        h => terms.find(h).map_or(NONE, |i| i as u32),
     }));
 }
 
@@ -731,7 +734,7 @@ fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, ids: &mut Vec<u32
 #[derive(Default)]
 struct Scratch {
     mask: Vec<u64>,
-    tokens: Vec<(Key, u64)>,
+    hashes: Vec<u64>,
 }
 
 /// Starts loading the cache line holding `r`. A hint only: it never faults.
