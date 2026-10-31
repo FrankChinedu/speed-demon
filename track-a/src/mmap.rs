@@ -14,15 +14,7 @@ unsafe extern "C" {
 }
 
 const PROT_READ: i32 = 1;
-const PROT_WRITE: i32 = 2;
 const MAP_PRIVATE: i32 = 2; // same value on Linux and macOS
-const MAP_ANONYMOUS: i32 = if cfg!(target_os = "linux") {
-    0x20
-} else {
-    0x1000
-};
-const MADV_DONTNEED: i32 = 4;
-const PAGE: usize = 4096;
 
 /// Maps the whole file for the life of the process (it is never unmapped).
 pub fn map(path: &Path) -> &'static [u8] {
@@ -48,31 +40,21 @@ pub fn map(path: &Path) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
-/// `len` bytes of zeroed, page-aligned anonymous memory for the life of the process.
-/// Pages are charged only once written.
-pub fn anon(len: usize) -> *mut u8 {
-    // SAFETY: a fresh private anonymous mapping; it aliases nothing.
-    let ptr = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            len.max(1),
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    assert!(ptr as isize != -1, "mmap of {len} bytes failed");
-    ptr
-}
-
-/// Gives the pages under `mem` back to the system. `mem` must start on a page
-/// boundary inside memory from `anon`, and own the rest of its last page too.
-pub fn release(mem: &'static mut [u32]) {
-    let len = (mem.len() * 4).next_multiple_of(PAGE);
-    // SAFETY: `mem` is consumed, so nothing reads these pages again; DONTNEED on
-    // private anonymous memory only drops them (they would read back as zero).
-    unsafe { madvise(mem.as_mut_ptr().cast(), len, MADV_DONTNEED) };
+/// Maps every page under `part` (a piece of a `map` result) in one system call
+/// instead of one page fault per few pages. Linux 5.14 and later; elsewhere, or if
+/// refused, the pages simply fault in as they are read.
+pub fn populate(part: &[u8]) {
+    #[cfg(target_os = "linux")]
+    {
+        const MADV_POPULATE_READ: i32 = 22;
+        let start = part.as_ptr() as usize & !4095;
+        let len = part.as_ptr() as usize + part.len() - start;
+        // SAFETY: the range lies inside a live read-only file mapping (rounded down to
+        // its page, which belongs to the same mapping), and populating changes no data.
+        unsafe { madvise(start as *mut u8, len, MADV_POPULATE_READ) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = part;
 }
 
 /// Opts this process out of transparent huge pages. With THP on, the first byte a
