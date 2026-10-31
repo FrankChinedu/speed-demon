@@ -349,9 +349,8 @@ impl Side {
             if dist.improve(v, nd) {
                 adj.prefetch(v);
                 heap.push(nd, v);
-                let back = other.get(v);
-                if back != u64::MAX {
-                    *best = (*best).min(nd + back);
+                if other.has(v) {
+                    *best = (*best).min(nd + other.get(v));
                 }
             }
         });
@@ -477,6 +476,9 @@ struct DistMap {
     slots: Vec<u64>,
     /// Slots filled since the last clear, so clearing costs what the query used.
     used: Vec<u32>,
+    /// One bit per node in the map: a cached test that spares the other side of a
+    /// bidirectional search a random probe for every node it reaches first.
+    seen: Vec<u64>,
 }
 
 impl Default for DistMap {
@@ -484,6 +486,7 @@ impl Default for DistMap {
         DistMap {
             slots: vec![NO_ENTRY; 1024],
             used: Vec::new(),
+            seen: Vec::new(),
         }
     }
 }
@@ -492,9 +495,19 @@ impl DistMap {
     /// Empties the map, keeping its capacity warm for the next large query.
     fn clear(&mut self) {
         for &i in &self.used {
+            let k = (self.slots[i as usize] >> DIST_BITS) as usize;
+            self.seen[k / 64] = 0;
             self.slots[i as usize] = NO_ENTRY;
         }
         self.used.clear();
+    }
+
+    /// Whether `k` is in the map.
+    #[inline]
+    fn has(&self, k: u32) -> bool {
+        self.seen
+            .get(k as usize / 64)
+            .is_some_and(|w| w >> (k % 64) & 1 == 1)
     }
 
     /// The slot holding `k`, or the empty slot where it would go.
@@ -528,6 +541,10 @@ impl DistMap {
             }
         } else {
             self.used.push(i as u32);
+            if k as usize / 64 >= self.seen.len() {
+                self.seen.resize(k as usize / 64 + 1, 0);
+            }
+            self.seen[k as usize / 64] |= 1 << (k % 64);
         }
         self.slots[i] = (k as u64) << DIST_BITS | d;
         if self.used.len() * 2 > self.slots.len() {
