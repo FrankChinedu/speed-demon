@@ -29,3 +29,11 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 8b02279 | shared bitset back, masked name words, direct regions | run-22d82e8e4eb0 | 0.0800 | 17.0 | 558 | 19.42 |
 | 5dde67a | FAILED EXPERIMENT: plain per-record interning without the batched prefetch passes: -50 lines but 14% slower (prefetch pays on x86); reverted | run-56db6cebd935 | 0.0909 | 16.8 | 508 | 18.53 |
 | b6426c7 | batched prefetch interning restored | run-13e118fa1487 | 0.0794 | 17.3 | 558 | 19.42 |
+| a16a1f9 | TIMING PROBE (fails the hash on purpose): exits after setup and the quote-parity split; T times everything before it | run-4432ab4b407d | 0.0142 | 8.7 | - | - |
+| 067d220 | FxHash step as a plain function instead of a Hasher impl (S 558 -> 536) | run-00f1dee770bf | 0.0718 | 16.8 | 536 | 20.67 |
+| 02def11 | TIMING PROBE 2 (fails the hash on purpose): exits after the parse loop | run-8f253c460e83 | 0.0785 | 16.9 | - | - |
+| 667c1b0 | word-arithmetic parsing of ids, region ids and amounts: within noise | run-426b991ca132 | 0.0775 | 16.9 | 550 | 19.80 |
+| b122872 | split points from the spec 2.2 guarantee instead of a whole-file quote count: -23 lines, time within noise | run-3dae84d9223d | 0.0714 | 16.2 | 527 | 20.95 |
+| 4df3012 | names identified by a strong 64-bit hash in one-line slots: one cache miss per lookup, no name arena or byte compare (see the note in the code on exactness) | run-a9e03fd3bd64 | 0.0601 | 13.7 | 497 | 23.82 |
+| 79f1da0 | TIMING PROBE 6 (fails the hash on purpose): parse without interning names | run-fb6f568a243d | 0.0358 | 8.4 | - | - |
+| b777978 | TIMING PROBE 7 (fails the hash on purpose): interning without the bitset writes | run-da5cc602094b | 0.0651 | 12.3 | - | - |

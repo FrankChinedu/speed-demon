@@ -32,3 +32,9 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 92c4439 | huge pages back on (random access into term tables), one 16-byte info record per term, dense terms as per-chunk bitmaps, L2-resident term filter | run-406845fe2029 | 0.4062 | 103.5 | 824 | 15.60 |
 | 5dde67a | query words straight into the token table (no HashMap): no measurable change | run-65e8b9df59ed | 0.4228 | 97.6 | 821 | 15.48 |
 | b6426c7 | token lookups staged per document with slot and info prefetch | run-d56e39318972 | 0.3959 | 98.6 | 860 | 15.85 |
+| dcc4444 | (unchanged code, rerun: shows ~10% board noise on B) | run-7a98cc7abed5 | 0.4355 | 98.2 | 860 | 15.13 |
+| a16a1f9 | TIMING PROBE (fails the hash on purpose): exits after indexing (plan + corpus pass); T times everything before it | run-115531432605 | 0.3483 | 96.3 | - | - |
+| 02def11 | TIMING PROBE 2 (fails the hash on purpose): exits after the plan (queries parsed, term table built) | run-c3fe1980b0d2 | 0.0255 | 13.0 | - | - |
+| b122872 | per-thread term buffer reused across chunks and 16-bit: 99 -> 87 MB | run-afb372de08aa | 0.4144 | 87.1 | 864 | 15.87 |
+| b842bd1 | four corpus chunks per thread so the last round is not half empty | run-56324b27483e | 0.3863 | 80.8 | 864 | 16.69 |
+| c2a6be9 | one 32-byte slot per query term (hash, id, BOOL index, phrase keys): a token lookup is one cache miss and no key compare | run-b573b8a0720c | 0.3546 | 83.8 | 860 | 17.31 |
