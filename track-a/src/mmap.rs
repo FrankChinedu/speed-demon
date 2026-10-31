@@ -10,10 +10,19 @@ use std::path::Path;
 
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
 const PROT_READ: i32 = 1;
+const PROT_WRITE: i32 = 2;
 const MAP_PRIVATE: i32 = 2; // same value on Linux and macOS
+const MAP_ANONYMOUS: i32 = if cfg!(target_os = "linux") {
+    0x20
+} else {
+    0x1000
+};
+const MADV_DONTNEED: i32 = 4;
+const PAGE: usize = 4096;
 
 /// Maps the whole file for the life of the process (it is never unmapped).
 pub fn map(path: &Path) -> &'static [u8] {
@@ -37,6 +46,33 @@ pub fn map(path: &Path) -> &'static [u8] {
     assert!(ptr as isize != -1, "mmap {} failed", path.display());
     // SAFETY: the mapping is valid for `len` bytes and lives until the process exits.
     unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+
+/// `len` bytes of zeroed, page-aligned anonymous memory for the life of the process.
+/// Pages are charged only once written.
+pub fn anon(len: usize) -> *mut u8 {
+    // SAFETY: a fresh private anonymous mapping; it aliases nothing.
+    let ptr = unsafe {
+        mmap(
+            std::ptr::null_mut(),
+            len.max(1),
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert!(ptr as isize != -1, "mmap of {len} bytes failed");
+    ptr
+}
+
+/// Gives the pages under `mem` back to the system. `mem` must start on a page
+/// boundary inside memory from `anon`, and own the rest of its last page too.
+pub fn release(mem: &'static mut [u32]) {
+    let len = (mem.len() * 4).next_multiple_of(PAGE);
+    // SAFETY: `mem` is consumed, so nothing reads these pages again; DONTNEED on
+    // private anonymous memory only drops them (they would read back as zero).
+    unsafe { madvise(mem.as_mut_ptr().cast(), len, MADV_DONTNEED) };
 }
 
 /// Opts this process out of transparent huge pages. With THP on, the first byte a

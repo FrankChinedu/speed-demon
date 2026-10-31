@@ -3,19 +3,18 @@
 //!
 //! 1. mmap the log and hand out 2 MB chunks of whole lines to the threads.
 //! 2. Each thread parses its lines into 4-byte records `endpoint << 21 | latency`,
-//!    appended to one block list per hour. Endpoints get global ids from a shared
-//!    registry the first time a thread meets them; after that a thread-local table
-//!    answers by 64-bit hash alone. Larger latencies and 5xx lines go to small side
+//!    appended to one block list per hour. Endpoint ids are per thread, from a table
+//!    keyed by 64-bit hash alone, and are mapped to global ranks afterwards (names
+//!    sorted bytewise, which is the output order). Larger latencies and 5xx lines go to small side
 //!    lists of the hour. Timestamps are never fully parsed: only the date (cached,
 //!    since consecutive lines share it) and the two hour digits matter.
 //! 3. One task per hour, in cache: a counting sort of the hour's records by endpoint
-//!    rank (names sorted bytewise, which is the output order), three nested selections
+//!    rank, three nested selections
 //!    per group, and the hour's lines formatted. Finished hours are written in order
 //!    and each hour's records are freed as soon as they are sorted.
 
 mod mmap;
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -29,24 +28,43 @@ const HOURS: usize = 72;
 const LAT_BITS: u32 = 21;
 const LAT_MASK: u32 = (1 << LAT_BITS) - 1;
 const MAX_ENDPOINTS: usize = 1 << (32 - LAT_BITS);
-/// Records are kept in 256 KB blocks: above malloc's mmap threshold, so each block
-/// is its own mapping, charged only for the pages written and returned to the
-/// system when freed, instead of staying in a malloc arena.
-const BLOCK: usize = 1 << 10;
+/// Records are kept in 16 KB blocks of one shared mapping (see `Arena`).
+const BLOCK: usize = 1 << 12;
 
 /// One thread's lines of one hour.
 #[derive(Default)]
 struct Hour {
-    blocks: Vec<Vec<u32>>,
+    blocks: Vec<&'static mut [u32]>,
     big: Vec<(u32, u32)>, // (endpoint, latency) for latencies of 2^21 and up
     errors: Vec<u16>,     // the endpoint of every 5xx line
 }
 
-/// Endpoint names by global id, shared by the parsing threads.
-#[derive(Default)]
-struct Registry {
-    ids: HashMap<u64, u32>,
-    names: Vec<&'static [u8]>,
+/// Record blocks carved from one anonymous mapping made up front, so the parse makes
+/// no system calls (each `mmap` would stall every thread faulting in the input), and
+/// each block's pages go back to the system as soon as it is consumed.
+struct Arena {
+    base: *mut u32,
+    blocks: usize,
+    next: AtomicUsize,
+}
+
+// SAFETY: `take` hands every block out once, so threads never share one.
+unsafe impl Sync for Arena {}
+
+impl Arena {
+    fn new(blocks: usize) -> Self {
+        let base = mmap::anon(blocks * BLOCK * 4).cast();
+        let next = AtomicUsize::new(0);
+        Arena { base, blocks, next }
+    }
+
+    fn take(&self) -> &'static mut [u32] {
+        let i = self.next.fetch_add(1, Relaxed);
+        assert!(i < self.blocks, "record arena exhausted");
+        // SAFETY: block i is in the mapping, which lives until exit, and is handed
+        // out exactly once, so this is the only reference to it.
+        unsafe { std::slice::from_raw_parts_mut(self.base.add(i * BLOCK), BLOCK) }
+    }
 }
 
 /// Summary lines are written in hour order as hours finish, in any order.
@@ -71,16 +89,17 @@ fn main() {
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
     let chunks = split_lines(input, (input.len() >> 21).max(threads));
     let next = AtomicUsize::new(0);
-    let registry = Mutex::new(Registry::default());
-    let parts: Vec<Vec<Hour>> = thread::scope(|s| {
+    // A line is at least 40 bytes, and each (thread, hour) has at most one part-full block.
+    let arena = Arena::new(input.len() / 40 / BLOCK + threads * HOURS + 1);
+    let parts: Vec<(Vec<Hour>, Vec<&[u8]>)> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (chunks, next, registry) = (&chunks, &next, &registry);
+                let (chunks, next, arena) = (&chunks, &next, &arena);
                 s.spawn(move || {
                     parse(
                         || chunks.get(next.fetch_add(1, Relaxed)).copied(),
                         base,
-                        registry,
+                        arena,
                     )
                 })
             })
@@ -88,17 +107,22 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
-    let names = registry.into_inner().unwrap().names;
-    // Endpoint ids in bytewise name order, which is exactly the spec's order.
-    let mut order: Vec<usize> = (0..names.len()).collect();
-    order.sort_unstable_by_key(|&e| names[e]);
-
-    let mut by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
-    for part in parts {
-        for (slot, hour) in by_hour.iter_mut().zip(part) {
-            slot.get_mut().unwrap().push(hour);
+    // Bytewise order of `&[u8]` is exactly the spec's endpoint order.
+    let mut names: Vec<&[u8]> = parts.iter().flat_map(|p| p.1.iter().copied()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut ranks = Vec::new();
+    let mut by_hour: Vec<Mutex<Vec<(usize, Hour)>>> =
+        (0..HOURS).map(|_| Mutex::default()).collect();
+    for (t, (hours, local)) in parts.into_iter().enumerate() {
+        ranks.push(
+            local
+                .iter()
+                .map(|e| names.binary_search(e).unwrap() as u32)
+                .collect::<Vec<_>>(),
+        );
+        for (slot, hour) in by_hour.iter_mut().zip(hours) {
+            slot.get_mut().unwrap().push((t, hour));
         }
     }
     let writer = Mutex::new(Writer {
@@ -109,7 +133,7 @@ fn main() {
     let next = AtomicUsize::new(0);
     thread::scope(|s| {
         for _ in 0..threads {
-            let (names, order, by_hour, writer, next) = (&names, &order, &by_hour, &writer, &next);
+            let (names, ranks, by_hour, writer, next) = (&names, &ranks, &by_hour, &writer, &next);
             s.spawn(move || {
                 let mut scratch = Scratch::new(names.len());
                 loop {
@@ -119,7 +143,7 @@ fn main() {
                     }
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
                     let lines =
-                        scratch.summarize(parts, hour_prefix(base + h as i64), names, order);
+                        scratch.summarize(parts, hour_prefix(base + h as i64), names, ranks);
                     let mut w = writer.lock().unwrap();
                     let w = &mut *w;
                     w.done[h] = Some(lines);
@@ -156,52 +180,54 @@ impl Scratch {
     /// The summary lines of one hour, from every thread's records of that hour.
     fn summarize(
         &mut self,
-        parts: Vec<Hour>,
+        parts: Vec<(usize, Hour)>,
         prefix: [u8; 21],
         names: &[&[u8]],
-        order: &[usize],
+        ranks: &[Vec<u32>],
     ) -> Vec<u8> {
         let (count, errors, end) = (&mut self.count, &mut self.errors, &mut self.end);
         count.fill(0);
         errors.fill(0);
-        for p in &parts {
-            for &r in p.blocks.iter().flatten() {
-                count[(r >> LAT_BITS) as usize] += 1;
+        for (t, p) in &parts {
+            let rank = &ranks[*t];
+            for &r in p.blocks.iter().flat_map(|b| b.iter()) {
+                count[rank[(r >> LAT_BITS) as usize] as usize] += 1;
             }
             for &(e, _) in &p.big {
-                count[e as usize] += 1;
+                count[rank[e as usize] as usize] += 1;
             }
             for &e in &p.errors {
-                errors[e as usize] += 1;
+                errors[rank[e as usize] as usize] += 1;
             }
         }
         // Counting sort by rank: `end[e]` starts as endpoint e's first slot.
         let mut total = 0;
-        for &e in order {
-            end[e] = total;
-            total += count[e];
+        for (end, &n) in end.iter_mut().zip(count.iter()) {
+            *end = total;
+            total += n;
         }
         let lat = &mut self.latencies;
         lat.clear();
         lat.resize(total as usize, 0);
-        for p in parts {
+        for (t, p) in parts {
+            let rank = &ranks[t];
             for block in p.blocks {
-                for r in block {
-                    let at = &mut end[(r >> LAT_BITS) as usize];
+                for &r in block.iter() {
+                    let at = &mut end[rank[(r >> LAT_BITS) as usize] as usize];
                     lat[*at as usize] = r & LAT_MASK;
                     *at += 1;
                 }
+                mmap::release(block);
             }
             for (e, l) in p.big {
-                let at = &mut end[e as usize];
+                let at = &mut end[rank[e as usize] as usize];
                 lat[*at as usize] = l;
                 *at += 1;
             }
         }
 
         let mut out = Vec::with_capacity(1 << 18);
-        for &e in order {
-            let n = count[e];
+        for (e, &n) in count.iter().enumerate() {
             if n == 0 {
                 continue;
             }
@@ -251,14 +277,15 @@ fn split_lines(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 fn parse(
     mut next_chunk: impl FnMut() -> Option<&'static [u8]>,
     base: i64,
-    registry: &Mutex<Registry>,
-) -> Vec<Hour> {
+    arena: &Arena,
+) -> (Vec<Hour>, Vec<&'static [u8]>) {
     let mut table = Endpoints {
         slots: vec![(0, 0); 2 * MAX_ENDPOINTS],
-        registry,
+        names: Vec::new(),
     };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
-    let mut open: Vec<Vec<u32>> = vec![Vec::new(); HOURS];
+    // Each hour's block being filled, and how many records it holds.
+    let mut open: Vec<(&'static mut [u32], usize)> = (0..HOURS).map(|_| (&mut [][..], 0)).collect();
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
     while let Some(chunk) = next_chunk() {
         let mut i = 0;
@@ -309,22 +336,24 @@ fn parse(
                 hours[hour].big.push((id, latency));
                 continue;
             }
-            let block = &mut open[hour];
-            if block.len() == block.capacity() {
-                let full = std::mem::replace(block, Vec::with_capacity(BLOCK));
+            let (block, fill) = &mut open[hour];
+            if *fill == block.len() {
+                let full = std::mem::replace(block, arena.take());
                 if !full.is_empty() {
                     hours[hour].blocks.push(full);
                 }
+                *fill = 0;
             }
-            block.push(id << LAT_BITS | latency);
+            block[*fill] = id << LAT_BITS | latency;
+            *fill += 1;
         }
     }
-    for (hour, block) in hours.iter_mut().zip(open) {
-        if !block.is_empty() {
-            hour.blocks.push(block);
+    for (hour, (block, fill)) in hours.iter_mut().zip(open) {
+        if fill > 0 {
+            hour.blocks.push(&mut block[..fill]);
         }
     }
-    hours
+    (hours, table.names)
 }
 
 const ONES: u64 = 0x0101_0101_0101_0101;
@@ -393,15 +422,14 @@ fn fmix(mut h: u64) -> u64 {
 }
 
 /// A thread's endpoint table, keyed by a strong 64-bit hash of the name alone: bytes
-/// are never compared on the hot path. Two of the 1,842 names sharing a hash has odds
-/// of about 1e-13 per run. New names take a global id from the shared registry, which
-/// does compare bytes, so a collision between names it sees is caught.
-struct Endpoints<'a> {
+/// are never compared. Two of the 1,842 names sharing a hash has odds of about 1e-13
+/// per run.
+struct Endpoints {
     slots: Vec<(u64, u32)>, // (hash, id); hash 0 marks an empty slot
-    registry: &'a Mutex<Registry>,
+    names: Vec<&'static [u8]>,
 }
 
-impl Endpoints<'_> {
+impl Endpoints {
     #[inline]
     fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
@@ -416,23 +444,9 @@ impl Endpoints<'_> {
             }
             i = (i + 1) & mask;
         }
-        let mut r = self.registry.lock().unwrap();
-        let id = match r.ids.get(&h) {
-            Some(&id) => {
-                assert!(
-                    r.names[id as usize] == name,
-                    "64-bit endpoint hash collision"
-                );
-                id
-            }
-            None => {
-                let id = r.names.len() as u32;
-                assert!((id as usize) < MAX_ENDPOINTS, "too many distinct endpoints");
-                r.names.push(name);
-                r.ids.insert(h, id);
-                id
-            }
-        };
+        let id = self.names.len() as u32;
+        assert!((id as usize) < MAX_ENDPOINTS, "too many distinct endpoints");
+        self.names.push(name);
         self.slots[i] = (h, id);
         id
     }
