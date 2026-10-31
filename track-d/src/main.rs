@@ -50,16 +50,9 @@ impl Adjacency {
     /// Builds the rows from edges grouped by bucket: `edges[starts[b]..starts[b + 1]]`
     /// are bucket b's, each `local tail << 53 | head << 32 | weight`. Every bucket's
     /// rows are a disjoint slice written by one worker, in cache, with no atomics.
-    /// Buckets finish roughly in order; the edges below the lowest unfinished one
-    /// are given back as they go, so the rows grow as the edges shrink.
     fn build(edges: &[AtomicU64], starts: &[usize], n: usize, threads: usize) -> Adjacency {
         let mut rows: Vec<Row> = zeroed(n);
-        let buckets = n.div_ceil(1 << BUCKET_BITS);
-        let work = Mutex::new((
-            rows.chunks_mut(1 << BUCKET_BITS).enumerate(),
-            vec![false; buckets], // finished buckets
-            0,                    // all buckets below this are finished
-        ));
+        let work = Mutex::new(rows.chunks_mut(1 << BUCKET_BITS).enumerate());
         let mut spill: Vec<(usize, Vec<u64>)> = thread::scope(|s| {
             let handles: Vec<_> = (0..threads)
                 .map(|_| {
@@ -68,20 +61,10 @@ impl Adjacency {
                         let mut done = Vec::new();
                         loop {
                             // Take the lock only to pick a bucket, not while filling it.
-                            let Some((b, rows)) = work.lock().unwrap().0.next() else {
+                            let Some((b, rows)) = work.lock().unwrap().next() else {
                                 break;
                             };
                             done.push((b, fill_bucket(b, rows, &edges[starts[b]..starts[b + 1]])));
-                            let (from, to) = {
-                                let (_, finished, low) = &mut *work.lock().unwrap();
-                                let from = *low;
-                                finished[b] = true;
-                                while *low < buckets && finished[*low] {
-                                    *low += 1;
-                                }
-                                (starts[from], starts[*low])
-                            };
-                            mmap::release(edges, from, to);
                         }
                         done
                     })
@@ -187,6 +170,7 @@ fn zeroed<T: Zeroable>(n: usize) -> Vec<T> {
 
 /// Types whose all-zero bit pattern is a valid value.
 trait Zeroable {}
+impl Zeroable for AtomicU64 {}
 impl Zeroable for Row {}
 
 struct Graph {
@@ -280,7 +264,7 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
     // Pass 2: each edge goes to its bucket in both directions. A chunk writes only
     // its own ranges, as about a thousand sequential streams instead of random words.
     let m = starts[0][buckets];
-    let edges = [mmap::zeroed_atomics(m), mmap::zeroed_atomics(m)];
+    let edges: [Vec<AtomicU64>; 2] = [zeroed(m), zeroed(m)];
     for_each_chunk(&chunks, threads, |k, chunk| {
         let [out, into] = &mut *counts[k].lock().unwrap();
         for_each_line(chunk, |u, v, w| {
@@ -292,10 +276,11 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         });
     });
 
-    // Rows, one direction at a time, giving each edge array back as it is consumed.
+    // Rows, one direction at a time, freeing each edge array once it is built.
     let [out_edges, into_edges] = edges;
-    let out = Adjacency::build(out_edges, &starts[0], n, threads);
-    let into = Adjacency::build(into_edges, &starts[1], n, threads);
+    let out = Adjacency::build(&out_edges, &starts[0], n, threads);
+    drop(out_edges);
+    let into = Adjacency::build(&into_edges, &starts[1], n, threads);
     Graph { out, into }
 }
 
