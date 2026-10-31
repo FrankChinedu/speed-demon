@@ -22,7 +22,9 @@ const MAP_ANONYMOUS: i32 = if cfg!(target_os = "linux") {
     0x1000
 };
 const MADV_DONTNEED: i32 = 4;
-const PAGE: usize = 4096;
+/// Release granularity: a transparent huge page. Dropping part of a 2 MB page only
+/// splits it, and the kernel keeps the whole page charged until memory runs short.
+const PAGE: usize = 2 << 20;
 
 /// `n` zeroed atomics in a private anonymous mapping that lives until exit. Pages
 /// are charged once written, and `release` hands them back early.
@@ -45,7 +47,7 @@ pub fn zeroed_atomics(n: usize) -> &'static [std::sync::atomic::AtomicU64] {
     unsafe { std::slice::from_raw_parts(ptr.cast(), n) }
 }
 
-/// Gives back the whole pages inside `words[from..to]` of a `zeroed_atomics`
+/// Gives back the whole (huge) pages inside `words[from..to]` of a `zeroed_atomics`
 /// mapping. The caller never reads that range again (it would read zeros).
 pub fn release(words: &[std::sync::atomic::AtomicU64], from: usize, to: usize) {
     let base = words.as_ptr() as usize;

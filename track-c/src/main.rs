@@ -344,67 +344,67 @@ fn prefetch<T>(r: &T) {
 }
 
 /// Lock-free interning of names into dense ids, shared by all threads, keyed by a
-/// strong 64-bit hash of the raw field bytes. A slot is a pair of words in one cache
-/// line, `[hash, id + 1]`, so a lookup is one miss and no byte comparison.
+/// strong 64-bit hash of the raw field bytes. A slot is one word, the hash's top 40
+/// bits above `id + 1`, so the table is 2 MB and a lookup is one probe with no byte
+/// comparison. The low 18 hash bits pick the first slot, so a name is identified by
+/// 58 independent hash bits.
 ///
-/// Identity by hash is not provably exact: two different names would have to share
-/// all 64 hash bits. For the spec's pool of 100,000 names that chance is about
-/// 3 * 10^-10 per run, and it buys half of this track's run time (the arena of name
+/// Identity by hash is not provably exact: two different names would have to agree
+/// on all of those bits. For the spec's pool of 100,000 names that chance is about
+/// 2 * 10^-8 per run, and it buys half of this track's run time (the arena of name
 /// bytes this replaced cost a second cache miss per record).
 struct Names {
     slots: Box<[AtomicU64]>,
     next_id: AtomicU32,
 }
 
+const ID_BITS: u32 = 24;
+const ID_MASK: u64 = (1 << ID_BITS) - 1;
+
 impl Names {
     fn new() -> Names {
         Names {
-            slots: zeroed_atomics(2 * NAME_SLOTS),
+            slots: zeroed_atomics(NAME_SLOTS),
             next_id: AtomicU32::new(0),
         }
     }
 
     /// The hash of the name `c[start..start + len]`: FxHash over its words, then a
-    /// full avalanche (MurmurHash3's finaliser). Never 0, which marks an empty slot.
+    /// full avalanche (MurmurHash3's finaliser).
     fn hash(c: &[u8], start: usize, len: usize) -> u64 {
         let mut h =
             (0..len.div_ceil(8)).fold(len as u64, |h, k| mix(h, name_word(c, start, len, k)));
         h = (h ^ h >> 33).wrapping_mul(0xff51_afd7_ed55_8ccd);
         h = (h ^ h >> 33).wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-        (h ^ h >> 33) | 1
+        h ^ h >> 33
     }
 
     /// Starts loading the slot a name with hash `h` probes first.
     #[inline]
     fn prefetch_slot(&self, h: u64) {
-        prefetch(&self.slots[2 * (h as usize & (NAME_SLOTS - 1))]);
+        prefetch(&self.slots[h as usize & (NAME_SLOTS - 1)]);
     }
 
-    /// The dense id of the name with hash `h`. A thread that finds an empty slot
-    /// claims it by writing the hash with one compare-exchange, then publishes the id;
-    /// a thread that meets a claimed slot whose id is not out yet waits for it.
+    /// The dense id of the name with hash `h`. A thread that finds an empty slot takes
+    /// a fresh id and claims the slot with one compare-exchange; if another thread
+    /// claimed it first, that id is simply never used (bits are only set for ids in
+    /// slots, so a skipped id changes no count).
     fn id(&self, h: u64) -> u32 {
+        let tag = h & !ID_MASK;
         let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
-            let (key, id) = (&self.slots[2 * i], &self.slots[2 * i + 1]);
-            let mut k = key.load(Acquire);
-            if k == 0 {
-                match key.compare_exchange(0, h, AcqRel, Acquire) {
-                    Ok(_) => {
-                        let new = self.next_id.fetch_add(1, Relaxed);
-                        id.store(new as u64 + 1, Release);
-                        return new;
-                    }
-                    Err(found) => k = found,
+            let slot = &self.slots[i];
+            let mut v = slot.load(Acquire);
+            if v == 0 {
+                let new = self.next_id.fetch_add(1, Relaxed);
+                assert!((new as u64) < ID_MASK, "too many distinct names");
+                match slot.compare_exchange(0, tag | (new as u64 + 1), AcqRel, Acquire) {
+                    Ok(_) => return new,
+                    Err(found) => v = found,
                 }
             }
-            if k == h {
-                loop {
-                    match id.load(Acquire) {
-                        0 => std::hint::spin_loop(),
-                        v => return (v - 1) as u32,
-                    }
-                }
+            if v & !ID_MASK == tag {
+                return ((v & ID_MASK) - 1) as u32;
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
