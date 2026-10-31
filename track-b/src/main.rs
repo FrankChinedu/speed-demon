@@ -285,9 +285,6 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    std::hint::black_box(&indexed);
-    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed
@@ -565,10 +562,7 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
             .iter()
             .position(|&b| b == b'\t')
             .expect("TAB after the id");
-        let eol = line[tab..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(line.len(), |e| tab + e);
+        let eol = tab + find_newline(&line[tab..]);
         let doc = line[..tab]
             .iter()
             .fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
@@ -576,6 +570,55 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
         p += eol + 1;
     }
 }
+
+/// Position of the first LF in `s` (or `s.len()`), 32 bytes at a time.
+#[inline]
+fn find_newline(s: &[u8]) -> usize {
+    let mut p = 0;
+    while let Some(block) = s.get(p..p + 32) {
+        let m = newline_mask(block.try_into().unwrap());
+        if m != 0 {
+            return p + m.trailing_zeros() as usize;
+        }
+        p += 32;
+    }
+    p + s[p..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(s.len() - p)
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+fn newline_mask(block: &[u8; 32]) -> u32 {
+    use std::arch::x86_64::*;
+    // SAFETY: AVX2 is enabled at compile time, and the load reads the 32-byte array.
+    unsafe {
+        let v = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8))) as u32
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+#[inline]
+fn newline_mask(block: &[u8; 32]) -> u32 {
+    block
+        .iter()
+        .enumerate()
+        .fold(0, |m, (i, &b)| m | ((b == b'\n') as u32) << i)
+}
+
+/// Bytes 0xFF then 0x00: the word at `KEEP[32 - len + 8 * w..]` keeps the bytes of
+/// word w that lie inside a token of `len` bytes.
+static KEEP: [u8; 64] = {
+    let mut keep = [0; 64];
+    let mut i = 0;
+    while i < 32 {
+        keep[i] = 0xff;
+        i += 1;
+    }
+    keep
+};
 
 /// A token, zero-padded to 32 bytes and read as four words, so hashing and comparing
 /// are a few word operations instead of a byte loop and a `memcmp` through a pointer.
@@ -769,28 +812,21 @@ fn next_bit(mask: &[u64], i: usize, flip: u64) -> Option<usize> {
 /// The lowercased, zero-padded key of the token `text[start..start + len]`. OR-ing
 /// 0x20 lowercases ASCII letters and leaves digits alone; the length mask clears the
 /// separator bytes that follow the token.
-#[inline]
+#[inline(always)]
 fn key_at(text: &[u8], start: usize, len: usize) -> Key {
+    // Almost always 32 bytes follow the start: four plain loads, no branches.
+    let mut padded = [0u8; 32];
+    let window = match text[start..].first_chunk::<32>() {
+        Some(w) => w,
+        None => {
+            padded[..text.len() - start].copy_from_slice(&text[start..]);
+            &padded
+        }
+    };
     std::array::from_fn(|w| {
-        let from = start + w * 8;
-        if w * 8 >= len {
-            return 0;
-        }
-        let word = match text.get(from..from + 8) {
-            Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
-            None => {
-                let mut b = [0u8; 8];
-                b[..text.len() - from].copy_from_slice(&text[from..]);
-                u64::from_le_bytes(b)
-            }
-        };
-        let keep = len - w * 8;
-        let word = word | 0x2020_2020_2020_2020;
-        if keep >= 8 {
-            word
-        } else {
-            word & ((1u64 << (keep * 8)) - 1)
-        }
+        let word = u64::from_le_bytes(window[8 * w..8 * w + 8].try_into().unwrap());
+        let keep = u64::from_le_bytes(KEEP[32 - len + 8 * w..][..8].try_into().unwrap());
+        (word | 0x2020_2020_2020_2020) & keep
     })
 }
 
