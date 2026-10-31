@@ -88,6 +88,8 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let names = registry.into_inner().unwrap().names;
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
     let mut order: Vec<usize> = (0..names.len()).collect();
