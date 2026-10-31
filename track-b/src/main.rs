@@ -263,7 +263,7 @@ fn main() {
                                 }
                             }
                             per_doc.push((terms.len() - before) as u32);
-                            std::hint::black_box((&keys, &terms)); // TIMING PROBE: no phrases
+                            match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
                         let base = base.unwrap_or(0);
                         assert!(
