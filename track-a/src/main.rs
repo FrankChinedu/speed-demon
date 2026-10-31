@@ -400,7 +400,7 @@ struct Endpoints<'a> {
 }
 
 impl Endpoints<'_> {
-    #[inline(always)]
+    #[inline]
     fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
         let mut i = h as usize & mask;
@@ -410,17 +410,10 @@ impl Endpoints<'_> {
                 return id;
             }
             if sh == 0 {
-                return self.insert(name, h, i);
+                break;
             }
             i = (i + 1) & mask;
         }
-    }
-
-    /// A name this thread has not met: its global id goes into empty slot `i`. Kept
-    /// out of line, so the lookup above stays small inside the parse loop.
-    #[cold]
-    #[inline(never)]
-    fn insert(&mut self, name: &'static [u8], h: u64, i: usize) -> u32 {
         let mut r = self.registry.lock().unwrap();
         let id = match r.ids.get(&h) {
             Some(&id) => {

@@ -389,15 +389,17 @@ impl Names {
     /// a fresh id and claims the slot with one compare-exchange; if another thread
     /// claimed it first, that id is simply never used (bits are only set for ids in
     /// slots, so a skipped id changes no count).
-    #[inline(always)]
     fn id(&self, h: u64) -> u32 {
         let tag = h & !ID_MASK;
         let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
-            let mut v = self.slots[i].load(Acquire);
+            let slot = &self.slots[i];
+            let mut v = slot.load(Acquire);
             if v == 0 {
-                match self.claim(i, tag) {
-                    Ok(new) => return new,
+                let new = self.next_id.fetch_add(1, Relaxed);
+                assert!((new as u64) < ID_MASK, "too many distinct names");
+                match slot.compare_exchange(0, tag | (new as u64 + 1), AcqRel, Acquire) {
+                    Ok(_) => return new,
                     Err(found) => v = found,
                 }
             }
@@ -406,18 +408,6 @@ impl Names {
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
-    }
-
-    /// Claims empty slot `i` for a new name; on a lost race, returns what won it.
-    /// Kept out of line, so the lookup above stays small inside the batch loop.
-    #[cold]
-    #[inline(never)]
-    fn claim(&self, i: usize, tag: u64) -> Result<u32, u64> {
-        let new = self.next_id.fetch_add(1, Relaxed);
-        assert!((new as u64) < ID_MASK, "too many distinct names");
-        self.slots[i]
-            .compare_exchange(0, tag | (new as u64 + 1), AcqRel, Acquire)
-            .map(|_| new)
     }
 }
 

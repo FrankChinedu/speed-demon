@@ -42,3 +42,4 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 5892567 | FAILED EXPERIMENT: structural-mask record parser: no faster, more memory; reverted | run-1702f527be4c | 0.0586 | 13.7 | 515 | 23.98 |
 | 209c01f | TIMING PROBE (fails the hash on purpose): no name interning: interning and the shared bitset cost ~21 ms | run-caa95fc37fcf | 0.0361 | 8.3 | - | - |
 | 241d75d | FAILED EXPERIMENT: owner-written bitset rows (no locked RMW), byte region table: 2 ms faster but more memory and lines, lower K; reverted | run-a6ac5a373a1e | 0.0552 | 12.9 | 542 | 24.83 |
+| 0ad8d98 | FAILED EXPERIMENT: cold claim path out of line: no gain; reverted | run-3f1b11477bac | 0.0599 | 11.4 | 500 | 24.70 |

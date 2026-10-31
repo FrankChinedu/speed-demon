@@ -34,3 +34,17 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 00310a5 | FAILED EXPERIMENT: delimiter bitmask parse (AVX2): no change on the box, +38 lines; reverted | run-d35c7a49c7af | 0.0458 | 41.3 | 567 | 26.31 |
 | ba0a249 | TIMING PROBE 4 (fails the hash on purpose): only reads the whole input map in parallel | run-27e9071e51eb | 0.0099 | 11.3 | - | - |
 | c5028ae | TIMING PROBE 5 (fails the hash on purpose): exits after the latency scatter | run-0945df59e033 | 0.0375 | 41.1 | - | - |
+| 59fcb1b | per-hour 4-byte records, one in-cache task per hour, hash-identity endpoint ids | run-7e80b92f35c5 | 0.0396 | 22.3 | 475 | 32.88 |
+| 68dec3f | TIMING PROBE (fails the hash on purpose): exits after the parse (256 KB mmap blocks) | run-8760faae8839 | 0.0326 | 17.8 | - | - |
+| 198096d | TIMING PROBE (fails the hash on purpose): exits after the parse, 4 KB heap blocks: same, so block mmaps are not the cost | run-29867f0b098f | 0.0310 | 17.5 | - | - |
+| 5a4630c | FAILED EXPERIMENT: thread-local ids plus one record mapping, 16 KB blocks released by madvise: slower | run-982e6bce4f52 | 0.0475 | 23.3 | 512 | 29.41 |
+| 1614751 | FAILED EXPERIMENT: same without releasing blocks: still slower than 59fcb1b; both reverted | run-09da972c1dfc | 0.0432 | 32.9 | 512 | 28.77 |
+| 70cc9cd | FAILED EXPERIMENT: MADV_POPULATE_READ per input chunk: no change; reverted | run-43815d55bb2f | 0.0405 | 22.3 | 488 | 32.37 |
+| 3f4cfda | FAILED EXPERIMENT: branch-free AVX2 endpoint scan and folded hash: 2% faster, +71 lines, lower K; reverted | run-7fef89ad3f28 | 0.0388 | 22.2 | 546 | 32.56 |
+| 18cf889 | TIMING PROBE (fails the hash on purpose): parse only, endpoint table removed: the table costs ~9 ms | run-589103ab56b3 | 0.0227 | 17.3 | - | - |
+| 7a08c2d | FAILED EXPERIMENT: thread-local endpoint ids alone (no registry): slower again; reverted | run-5146a0a7a7e3 | 0.0435 | 23.0 | 456 | 31.37 |
+| 81e0731 | noise check: unchanged 59fcb1b code | run-b1a450557639 | 0.0432 | 22.9 | 475 | 31.29 |
+| 209c01f | FAILED EXPERIMENT: one-word 32 KB endpoint table: no change; reverted | run-37d9f7da7468 | 0.0425 | 22.0 | 476 | 31.79 |
+| 9c83538 | FAILED EXPERIMENT: two halves of each chunk parsed in lockstep: no change; reverted | run-343c93875116 | 0.0404 | 22.5 | 491 | 32.31 |
+| e041e16 | TIMING PROBE (fails the hash on purpose): lookups done, records independent of them: the lookup work itself is the ~10 ms | run-6bab828bfa12 | 0.0338 | 18.0 | - | - |
+| 0ad8d98 | FAILED EXPERIMENT: cold insert path out of line: no gain (box noisy this run); reverted | run-0ab5b869a85f | 0.0437 | 23.9 | 479 | 30.80 |
