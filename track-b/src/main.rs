@@ -263,18 +263,14 @@ fn main() {
                                 }
                             }
                             per_doc.push((terms.len() - before) as u32);
-                            match_phrases(plan, &ids, &keys, doc, &mut matches);
+                            std::hint::black_box((&keys, &terms)); // TIMING PROBE: no phrases
                         });
                         let base = base.unwrap_or(0);
                         assert!(
                             per_doc.len() <= 1 << 16,
                             "chunk too large for 16-bit offsets"
                         );
-                        done.push((
-                            base as usize,
-                            counting_sort(base, &terms, &per_doc, plan.n_bool),
-                            matches,
-                        ));
+                        std::hint::black_box((base, &per_doc, &mut matches)); // TIMING PROBE: no sort
                     }
                     done
                 })
@@ -285,6 +281,9 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
+    std::hint::black_box(&indexed);
+    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed
@@ -640,14 +639,13 @@ struct Slot {
 /// thread. Terms are identified by a strong 64-bit hash of their bytes, so a lookup
 /// is one cache miss with no key comparison. (A corpus token would have to share all
 /// 64 bits with a query term to be mistaken for it: about 4 * 10^-9 per run for the
-/// spec's 600,000 distinct tokens and 110,000 query terms.) In front of it, a 128 KB
-/// bit filter (two bits per term) that stays in L2: most corpus tokens are not query
-/// terms, and the filter turns their lookup into a cached test.
+/// spec's 600,000 distinct tokens and 110,000 query terms.) Most corpus tokens are
+/// query terms, so there is no filter in front of it: on the box a 128 KB bit filter
+/// saved nothing.
 struct Terms {
     mask: usize,
     slots: Vec<Slot>,
     count: u32,
-    filter: Vec<u64>,
 }
 
 impl Default for Terms {
@@ -656,23 +654,12 @@ impl Default for Terms {
     }
 }
 
-const FILTER_BITS: u32 = 20;
-
-#[inline]
-fn filter_bits(h: u64) -> (usize, usize) {
-    (
-        (h >> (64 - FILTER_BITS)) as usize,
-        (h >> (40 - FILTER_BITS)) as usize & ((1 << FILTER_BITS) - 1),
-    )
-}
-
 impl Terms {
     fn with_capacity(cap: usize) -> Terms {
         Terms {
             mask: cap - 1,
             slots: vec![Slot::default(); cap],
             count: 0,
-            filter: vec![0; 1 << (FILTER_BITS - 6)],
         }
     }
 
@@ -705,15 +692,6 @@ impl Terms {
             i = (i + 1) & self.mask;
         }
         self.slots[i] = slot;
-        let (a, b) = filter_bits(slot.hash);
-        self.filter[a / 64] |= 1 << (a % 64);
-        self.filter[b / 64] |= 1 << (b % 64);
-    }
-
-    #[inline]
-    fn filtered_out(&self, h: u64) -> bool {
-        let (a, b) = filter_bits(h);
-        self.filter[a / 64] >> (a % 64) & self.filter[b / 64] >> (b % 64) & 1 == 0
     }
 
     /// The slot index of the term with hash `h`, if it is a query term.

@@ -257,84 +257,64 @@ fn parse(
     };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
     let mut open: Vec<Vec<u32>> = vec![Vec::new(); HOURS];
-    // Parses the line at `chunk[i..]` and returns where the next one starts. `date` caches
-    // the last date seen and its first hour.
-    let mut step = |chunk: &'static [u8], i: usize, date: &mut ((u64, u16), i64)| -> usize {
-        let line = &chunk[i..];
-        // Lines arrive in time-ordered shards, so the date rarely changes between lines.
-        let d = (word(line, 0), u16::from_le_bytes([line[8], line[9]]));
-        if d != date.0 {
-            *date = (
-                d,
-                days_from_civil(num(&line[0..4]), num(&line[5..7]), num(&line[8..10])) * 24,
-            );
-        }
-        let hour = date.1 + num(&line[11..13]) - base;
-        assert!(
-            (0..HOURS as i64).contains(&hour),
-            "timestamp outside the 72-hour span"
-        );
-        let hour = hour as usize;
-        // The method starts at byte 28 and is at most 7 bytes, so the space after it
-        // is in the next word: no branch on which method it is.
-        let ep_start = 29 + first_byte(word(line, 28), SPACES);
-        // Find the space after the endpoint eight bytes at a time, hashing each word
-        // on the way, so the endpoint is scanned once for both jobs.
-        let (mut k, mut h) = (ep_start, 0u64);
-        let ep_end = loop {
-            let w = word(line, k);
-            let x = w ^ SPACES;
-            let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
-            if spaces != 0 {
-                let n = spaces.trailing_zeros() as usize / 8;
-                h = mix(h, w & ((1u64 << (n * 8)) - 1));
-                break k + n;
-            }
-            h = mix(h, w);
-            k += 8;
-        };
-        let id = table.id(
-            &line[ep_start..ep_end],
-            fmix(h ^ (ep_end - ep_start) as u64) | 1,
-        );
-        let (latency, j) = latency(line, ep_end + 5);
-        if line[ep_end + 1] == b'5' {
-            hours[hour].errors.push(id as u16);
-        }
-        if latency > LAT_MASK {
-            hours[hour].big.push((id, latency));
-            return i + j + 1;
-        }
-        let block = &mut open[hour];
-        if block.len() == block.capacity() {
-            let full = std::mem::replace(block, Vec::with_capacity(BLOCK));
-            if !full.is_empty() {
-                hours[hour].blocks.push(full);
-            }
-        }
-        block.push(id << LAT_BITS | latency);
-        i + j + 1
-    };
-    let (mut date_a, mut date_b) = (((u64::MAX, 0u16), 0i64), ((u64::MAX, 0u16), 0i64));
+    let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
     while let Some(chunk) = next_chunk() {
-        // The two halves of the chunk are parsed in lockstep. Each line's start depends
-        // on the end of the line before, so one stream is a chain of dependent loads;
-        // two independent chains let the core overlap them.
-        let mid = chunk[chunk.len() / 2..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(chunk.len(), |p| chunk.len() / 2 + p + 1);
-        let (a, b) = chunk.split_at(mid);
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() && j < b.len() {
-            i = step(a, i, &mut date_a);
-            j = step(b, j, &mut date_b);
-        }
-        while i < a.len() {
-            i = step(a, i, &mut date_a);
-        }
-        while j < b.len() {
-            j = step(b, j, &mut date_b);
+        let mut i = 0;
+        while i < chunk.len() {
+            let line = &chunk[i..];
+            // Lines arrive in time-ordered shards, so the date rarely changes between lines.
+            let d = (word(line, 0), u16::from_le_bytes([line[8], line[9]]));
+            if d != date {
+                date = d;
+                date_hours =
+                    days_from_civil(num(&line[0..4]), num(&line[5..7]), num(&line[8..10])) * 24;
+            }
+            let hour = date_hours + num(&line[11..13]) - base;
+            assert!(
+                (0..HOURS as i64).contains(&hour),
+                "timestamp outside the 72-hour span"
+            );
+            let hour = hour as usize;
+            // The method starts at byte 28 and is at most 7 bytes, so the space after it
+            // is in the next word: no branch on which method it is.
+            let ep_start = 29 + first_byte(word(line, 28), SPACES);
+            // Find the space after the endpoint eight bytes at a time, hashing each word
+            // on the way, so the endpoint is scanned once for both jobs.
+            let (mut k, mut h) = (ep_start, 0u64);
+            let ep_end = loop {
+                let w = word(line, k);
+                let x = w ^ SPACES;
+                let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
+                if spaces != 0 {
+                    let n = spaces.trailing_zeros() as usize / 8;
+                    h = mix(h, w & ((1u64 << (n * 8)) - 1));
+                    break k + n;
+                }
+                h = mix(h, w);
+                k += 8;
+            };
+            let id = table.id(
+                &line[ep_start..ep_end],
+                fmix(h ^ (ep_end - ep_start) as u64) | 1,
+            );
+            let (latency, j) = latency(line, ep_end + 5);
+            i += j + 1;
+
+            if line[ep_end + 1] == b'5' {
+                hours[hour].errors.push(id as u16);
+            }
+            if latency > LAT_MASK {
+                hours[hour].big.push((id, latency));
+                continue;
+            }
+            let block = &mut open[hour];
+            if block.len() == block.capacity() {
+                let full = std::mem::replace(block, Vec::with_capacity(BLOCK));
+                if !full.is_empty() {
+                    hours[hour].blocks.push(full);
+                }
+            }
+            block.push(id << LAT_BITS | latency);
         }
     }
     for (hour, block) in hours.iter_mut().zip(open) {
