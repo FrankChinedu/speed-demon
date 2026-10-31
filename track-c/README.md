@@ -4,13 +4,13 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-Rust, zero dependencies. The file is split for threads by quote parity. Under the spec's grammar a byte is inside quotes exactly when an odd number of `"` bytes precede it, so a parallel count gives the exact quote state at each split point. Each chunk starts just after a terminator that is outside quotes. This uses only section 2.1 of the spec, not the generator's habits.
+Rust, zero dependencies. **Splitting.** Section 2.2 of the spec, which solutions may rely on, guarantees that a line inside a quoted field never starts with a digit, while every record starts with a digit or a BOM. So each split point is the first newline after a guess that is followed by a digit or a BOM, found by looking at a few bytes, with no pass over the whole file first.
 
-Each thread parses records with a byte-level state machine on the map: BOM skip, quoted fields with `""` escapes, CRLF or LF, and amounts in integer cents. It joins through a dense `region_id -> country` array and keeps running sums.
+**Parse.** Each thread parses records straight from the map with word-at-a-time (SWAR) field scans: BOM skip, quoted fields with `""` escapes, CRLF or LF, ids and amounts by multiply-combine digit conversion, amounts in integer cents. It joins through a dense `region_id -> country` array and keeps running sums per country.
 
-Distinct names need no unescaping. Raw field bytes identify a value exactly, because an unquoted field cannot contain `"` and unescaping is one-to-one. One lock-free table, shared by all threads, gives each raw name a dense id, and each country sets that id's bit in a zero-initialised bitset.
+**Distinct names.** These need no unescaping: raw field bytes identify a value exactly, because an unquoted field cannot contain `"` and unescaping is one-to-one (the two empty forms are special-cased to one value). One lock-free table, shared by all threads, gives each name a dense id. A slot is one word, a 40-bit hash tag above the id, so the table is 2 MB. Each country sets that id's bit in a shared bitset. Lookups go in batches of 32: hash and prefetch every slot, then resolve ids and prefetch the bitset words, then set the bits, so the cache misses of a batch overlap. Names are identified by 58 hash bits; for the spec's pool of 100,000 names the chance of a collision is about 2 * 10^-8 per run.
 
-The step-by-step history, with measurements and failed experiments, is in [PERF.md](PERF.md).
+The step-by-step history, with every board measurement, the timing probes and the failed experiments, is in [PERF.md](PERF.md).
 
 ## Dependencies
 
@@ -22,5 +22,5 @@ None. Standard library only. `mmap` is declared directly against the C library t
 
 ## With another 24 hours
 
-- SIMD quote and comma search inside fields (AVX2 `movemask`). Field scanning is now the largest cost.
-- Vectorise the quote-parity count used for splitting.
+- Interning and the shared bitset are about 40% of the run (a box probe without them: 36 ms against 57 ms). Owner-partitioned bitset rows, which remove the locked RMW, saved 2 ms but cost memory. A cheaper route to distinct counts would be the next big step.
+- A structural (simdcsv-style) parser was tried and measured no faster on the box: field scanning is not the bottleneck.

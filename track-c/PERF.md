@@ -37,3 +37,8 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 4df3012 | names identified by a strong 64-bit hash in one-line slots: one cache miss per lookup, no name arena or byte compare (see the note in the code on exactness) | run-a9e03fd3bd64 | 0.0601 | 13.7 | 497 | 23.82 |
 | 79f1da0 | TIMING PROBE 6 (fails the hash on purpose): parse without interning names | run-fb6f568a243d | 0.0358 | 8.4 | - | - |
 | b777978 | TIMING PROBE 7 (fails the hash on purpose): interning without the bitset writes | run-da5cc602094b | 0.0651 | 12.3 | - | - |
+| 81e0731 | FAILED EXPERIMENT: PREFETCHW for the shared bitset: no change; reverted | run-59e79fdb7e13 | 0.0594 | 14.0 | 507 | 23.78 |
+| 30de835 | one-word name slots (40-bit tag above the id): 2 MB table instead of 4 MB | run-9ae715470d5f | 0.0573 | 11.3 | 493 | 25.36 |
+| 5892567 | FAILED EXPERIMENT: structural-mask record parser: no faster, more memory; reverted | run-1702f527be4c | 0.0586 | 13.7 | 515 | 23.98 |
+| 209c01f | TIMING PROBE (fails the hash on purpose): no name interning: interning and the shared bitset cost ~21 ms | run-caa95fc37fcf | 0.0361 | 8.3 | - | - |
+| 241d75d | FAILED EXPERIMENT: owner-written bitset rows (no locked RMW), byte region table: 2 ms faster but more memory and lines, lower K; reverted | run-a6ac5a373a1e | 0.0552 | 12.9 | 542 | 24.83 |

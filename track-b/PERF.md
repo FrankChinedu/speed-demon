@@ -38,3 +38,12 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | b122872 | per-thread term buffer reused across chunks and 16-bit: 99 -> 87 MB | run-afb372de08aa | 0.4144 | 87.1 | 864 | 15.87 |
 | b842bd1 | four corpus chunks per thread so the last round is not half empty | run-56324b27483e | 0.3863 | 80.8 | 864 | 16.69 |
 | c2a6be9 | one 32-byte slot per query term (hash, id, BOOL index, phrase keys): a token lookup is one cache miss and no key compare | run-b573b8a0720c | 0.3546 | 83.8 | 860 | 17.31 |
+| fe37840 | TIMING PROBE (fails the hash on purpose): exits after the corpus pass, so queries take ~80 ms | run-79d6b34c3dc8 | 0.2718 | 83.8 | - | - |
+| bd38c4c | newline search 32 bytes at a time, branch-free inlined token keys | run-1d8d70dc7964 | 0.3143 | 83.6 | 890 | 18.29 |
+| 18cf889 | TIMING PROBE (fails the hash on purpose): corpus pass tokenizing only: postings and phrases cost ~100 ms | run-a80663e7b75a | 0.1684 | 37.8 | - | - |
+| 7a08c2d | FAILED EXPERIMENT: bulk result summaries (popcounts): no change; reverted | run-65de97376cdd | 0.3194 | 81.6 | 915 | 18.16 |
+| 9c83538 | no bit filter in front of the term table: same speed, so the filter is removed | run-ccdd0dba725c | 0.3127 | 84.6 | 886 | 18.31 |
+| 87d019f | TIMING PROBE (fails the hash on purpose): tokenizing and posting collection only: phrases and counting sort cost ~95 ms | run-8fd21631ea78 | 0.1772 | 33.9 | - | - |
+| cef5dc1 | TIMING PROBE (fails the hash on purpose): no counting sort: the sort costs ~84 ms | run-9fe8abd767c0 | 0.1883 | 34.8 | - | - |
+| 6024f45 | postings collected by term range, scattered one range at a time; no term filter | run-718e56e8faac | 0.2914 | 99.6 | 866 | 18.42 |
+| 4b83e56 | FAILED EXPERIMENT: eight chunks per thread: slower queries over twice the chunks; reverted | run-eb7d798fa4af | 0.3087 | 95.6 | 871 | 18.03 |

@@ -88,8 +88,6 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     let names = registry.into_inner().unwrap().names;
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
     let mut order: Vec<usize> = (0..names.len()).collect();
@@ -295,9 +293,10 @@ fn parse(
                 h = mix(h, w);
                 k += 8;
             };
-            let hh = fmix(h ^ (ep_end - ep_start) as u64) | 1;
-            std::hint::black_box(table.id(&line[ep_start..ep_end], hh)); // TIMING PROBE
-            let id = hh as u32 & 2047;
+            let id = table.id(
+                &line[ep_start..ep_end],
+                fmix(h ^ (ep_end - ep_start) as u64) | 1,
+            );
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -401,7 +400,7 @@ struct Endpoints<'a> {
 }
 
 impl Endpoints<'_> {
-    #[inline]
+    #[inline(always)]
     fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
         let mut i = h as usize & mask;
@@ -411,10 +410,17 @@ impl Endpoints<'_> {
                 return id;
             }
             if sh == 0 {
-                break;
+                return self.insert(name, h, i);
             }
             i = (i + 1) & mask;
         }
+    }
+
+    /// A name this thread has not met: its global id goes into empty slot `i`. Kept
+    /// out of line, so the lookup above stays small inside the parse loop.
+    #[cold]
+    #[inline(never)]
+    fn insert(&mut self, name: &'static [u8], h: u64, i: usize) -> u32 {
         let mut r = self.registry.lock().unwrap();
         let id = match r.ids.get(&h) {
             Some(&id) => {
