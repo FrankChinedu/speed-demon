@@ -88,6 +88,8 @@ fn main() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let names = registry.into_inner().unwrap().names;
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
     let mut order: Vec<usize> = (0..names.len()).collect();
@@ -293,10 +295,8 @@ fn parse(
                 h = mix(h, w);
                 k += 8;
             };
-            let id = table.id(
-                &line[ep_start..ep_end],
-                fmix(h ^ (ep_end - ep_start) as u64) | 1,
-            );
+            let id = (fmix(h ^ (ep_end - ep_start) as u64) as u32) & 2047; // TIMING PROBE: no table
+            let _ = &mut table;
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
