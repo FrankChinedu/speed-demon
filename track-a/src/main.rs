@@ -340,7 +340,6 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
     let (mut hour_min, mut hour_max) = (u32::MAX, 0);
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
     while let Some(chunk) = next_chunk() {
-        let mut delims = Delims::new(chunk);
         let mut i = 0;
         while i < chunk.len() {
             let line = &chunk[i..];
@@ -357,17 +356,28 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
                 "timestamp outside the supported span"
             );
             let hour = hour as u32;
-            // A line has exactly four spaces and a newline: after the timestamp, after
-            // the method, after the endpoint, after the status, and at the end.
-            let [_, method_end, ep_end, status_end, end] = std::array::from_fn(|_| delims.next());
-            let endpoint = &chunk[method_end + 1..ep_end];
-            let id = table.id(
-                endpoint,
-                endpoint_hash(chunk, method_end + 1, endpoint.len()),
-            );
-            let is_error = chunk[ep_end + 1] == b'5';
-            let latency = decimal(chunk, status_end + 1, end - status_end - 1);
-            i = end + 1;
+            // The method starts at byte 28 and is at most 7 bytes, so the space after it
+            // is in the next word: no branch on which method it is.
+            let ep_start = 29 + first_byte(word(line, 28), SPACES);
+            // Find the space after the endpoint eight bytes at a time, hashing each word
+            // on the way, so the endpoint is scanned once for both jobs.
+            let (mut k, mut h) = (ep_start, 0u64);
+            let ep_end = loop {
+                let w = word(line, k);
+                let x = w ^ SPACES;
+                let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
+                if spaces != 0 {
+                    let n = spaces.trailing_zeros() as usize / 8;
+                    h = mix(h, w & ((1u64 << (n * 8)) - 1));
+                    break k + n;
+                }
+                h = mix(h, w);
+                k += 8;
+            };
+            let id = table.id(&line[ep_start..ep_end], h);
+            let is_error = line[ep_end + 1] == b'5';
+            let (latency, j) = latency(line, ep_end + 5);
+            i += j + 1;
 
             assert!(id < 1 << EP_BITS, "too many distinct endpoints");
             hour_min = hour_min.min(hour);
@@ -390,6 +400,11 @@ fn parse(mut next_chunk: impl FnMut() -> Option<&'static [u8]>, base: i64) -> Pa
     }
 }
 
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGHS: u64 = 0x8080_8080_8080_8080;
+const SPACES: u64 = 0x2020_2020_2020_2020;
+const NEWLINES: u64 = 0x0a0a_0a0a_0a0a_0a0a;
+
 /// Eight bytes at `i` as a little-endian word, zero-padded past the end of `b`.
 #[inline]
 fn word(b: &[u8], i: usize) -> u64 {
@@ -404,99 +419,35 @@ fn word(b: &[u8], i: usize) -> u64 {
     }
 }
 
-/// Positions of the spaces and newlines in a chunk, in order. Each 64-byte block is
-/// classified into one bitmask (two AVX2 compares per 32 bytes on x86) and the
-/// positions are popped with trailing-zero counts: no byte-by-byte scan anywhere.
-struct Delims<'a> {
-    text: &'a [u8],
-    block: usize,
-    mask: u64,
-}
-
-impl<'a> Delims<'a> {
-    fn new(text: &'a [u8]) -> Self {
-        Delims {
-            text,
-            block: 0,
-            mask: delim_mask(text, 0),
-        }
-    }
-
-    /// The next delimiter. The caller never asks past the chunk's last newline.
-    #[inline]
-    fn next(&mut self) -> usize {
-        while self.mask == 0 {
-            self.block += 1;
-            self.mask = delim_mask(self.text, self.block * 64);
-        }
-        let p = self.block * 64 + self.mask.trailing_zeros() as usize;
-        self.mask &= self.mask - 1;
-        p
-    }
-}
-
-/// One bit per byte of `text[at..at + 64]`, set for spaces and newlines.
+/// Index of the first byte of `w` equal to the byte repeated in `pattern` (8 if none).
 #[inline]
-fn delim_mask(text: &[u8], at: usize) -> u64 {
-    match text.get(at..at + 64) {
-        Some(block) => block_mask(block.try_into().unwrap()),
-        None => (text[at.min(text.len())..].iter().enumerate())
-            .fold(0, |m, (i, &b)| m | ((b == b' ' || b == b'\n') as u64) << i),
-    }
+fn first_byte(w: u64, pattern: u64) -> usize {
+    let x = w ^ pattern;
+    (x.wrapping_sub(ONES) & !x & HIGHS).trailing_zeros() as usize / 8
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+/// The decimal latency at `p` and the position of the newline after it. Up to seven
+/// digits (all but the rarest values) are found and converted with word arithmetic:
+/// left-align the digits, then combine pairs, quads and octets by multiplication.
 #[inline]
-fn block_mask(block: &[u8; 64]) -> u64 {
-    use std::arch::x86_64::*;
-    // SAFETY: AVX2 is enabled at compile time (target-cpu=x86-64-v3), and both loads
-    // read 32 bytes inside the 64-byte block.
-    unsafe {
-        let half = |p: *const u8| {
-            let v = _mm256_loadu_si256(p as *const __m256i);
-            let hits = _mm256_or_si256(
-                _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b' ' as i8)),
-                _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8)),
-            );
-            _mm256_movemask_epi8(hits) as u32 as u64
-        };
-        half(block.as_ptr()) | half(block.as_ptr().add(32)) << 32
-    }
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-#[inline]
-fn block_mask(block: &[u8; 64]) -> u64 {
-    (block.iter().enumerate()).fold(0, |m, (i, &b)| m | ((b == b' ' || b == b'\n') as u64) << i)
-}
-
-/// A hash of the endpoint `text[at..at + len]` from its length and its first and last
-/// eight bytes: fixed work per line. Endpoints that agree on those are told apart by
-/// the table's full comparison, so the result stays exact.
-#[inline]
-fn endpoint_hash(text: &[u8], at: usize, len: usize) -> u64 {
-    let first = word(text, at)
-        & if len >= 8 {
-            u64::MAX
-        } else {
-            (1 << (8 * len)) - 1
-        };
-    let last = if len > 8 { word(text, at + len - 8) } else { 0 };
-    mix(mix(len as u64, first), last)
-}
-
-/// The decimal `text[at..at + len]`. Up to eight digits (all but the rarest
-/// latencies) are converted with word arithmetic: left-align the digits, then combine
-/// pairs, quads and octets by multiplication.
-#[inline]
-fn decimal(text: &[u8], at: usize, len: usize) -> u32 {
-    if len <= 8 {
-        let digits = (word(text, at) << (8 * (8 - len))) & 0x0f0f_0f0f_0f0f_0f0f;
+fn latency(line: &[u8], p: usize) -> (u32, usize) {
+    let w = word(line, p);
+    let n = first_byte(w, NEWLINES);
+    // n == 8 means no newline in this word (eight or more digits): take the loop.
+    if (1..8).contains(&n) {
+        let digits = (w << (8 * (8 - n))) & 0x0f0f_0f0f_0f0f_0f0f; // leading zero bytes
         let v = digits.wrapping_mul(10 * (1 << 8) + 1) >> 8 & 0x00ff_00ff_00ff_00ff;
         let v = v.wrapping_mul(100 * (1 << 16) + 1) >> 16 & 0x0000_ffff_0000_ffff;
-        return (v.wrapping_mul(10000 * (1 << 32) + 1) >> 32) as u32;
+        let v = v.wrapping_mul(10000 * (1 << 32) + 1) >> 32;
+        return (v as u32, p + n);
     }
-    (text[at..at + len].iter()).fold(0, |v, &b| v * 10 + (b - b'0') as u32)
+    let mut j = p;
+    let mut v = 0u32;
+    while line[j] != b'\n' {
+        v = v * 10 + (line[j] - b'0') as u32;
+        j += 1;
+    }
+    (v, j)
 }
 
 #[inline]
