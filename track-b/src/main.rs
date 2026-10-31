@@ -193,45 +193,16 @@ impl Acc {
     }
 }
 
-/// Feeds a chunk's result set to `out`. Only the first ten documents are needed one
-/// by one; past them, a list adds its length and sum, and a bitmap word adds its
-/// popcount and the sum of its bit positions (bit k of a position, counted by one
-/// masked popcount per k).
 fn emit(s: Set, base: u32, out: &mut Summary) {
     match s {
-        Set::List(l) => {
-            let head = l.len().min(10usize.saturating_sub(out.count as usize));
-            l[..head].iter().for_each(|&d| out.add(base + d as u32));
-            let rest = &l[head..];
-            out.count += rest.len() as u64;
-            out.sum +=
-                rest.len() as u64 * base as u64 + rest.iter().map(|&d| d as u64).sum::<u64>();
-        }
+        Set::List(l) => l.iter().for_each(|&d| out.add(base + d as u32)),
         Set::Bits(b) => {
-            const POS: [u64; 6] = [
-                0xaaaa_aaaa_aaaa_aaaa,
-                0xcccc_cccc_cccc_cccc,
-                0xf0f0_f0f0_f0f0_f0f0,
-                0xff00_ff00_ff00_ff00,
-                0xffff_0000_ffff_0000,
-                0xffff_ffff_0000_0000,
-            ];
             for (k, &w) in b.iter().enumerate() {
-                let at = base as u64 + (k * 64) as u64;
-                if out.count < 10 {
-                    let mut w = w;
-                    while w != 0 {
-                        out.add(at as u32 + w.trailing_zeros());
-                        w &= w - 1;
-                    }
-                    continue;
+                let mut w = w;
+                while w != 0 {
+                    out.add(base + (k * 64) as u32 + w.trailing_zeros());
+                    w &= w - 1;
                 }
-                let n = w.count_ones() as u64;
-                out.count += n;
-                out.sum += n * at
-                    + (0..6)
-                        .map(|j| ((w & POS[j]).count_ones() as u64) << j)
-                        .sum::<u64>();
             }
         }
     }

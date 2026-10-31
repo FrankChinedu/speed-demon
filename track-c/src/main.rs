@@ -235,7 +235,7 @@ impl Seen<'_> {
     #[inline]
     fn prefetch(&self, g: usize, id: u32) {
         if (id as usize) < MAX_IDS {
-            prefetch(&self.bits[(g * MAX_IDS + id as usize) / 64]);
+            prefetch_write(&self.bits[(g * MAX_IDS + id as usize) / 64]);
         }
     }
 
@@ -328,6 +328,21 @@ fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen)
     for (&id, &(g, ..)) in ids.iter().zip(batch) {
         seen.insert(g, id);
     }
+}
+
+/// Starts loading the cache line holding `r` in exclusive state (PREFETCHW), for a
+/// line about to be written: the shared bitset's words move between cores, and a
+/// read prefetch would leave the ownership transfer on the critical path.
+#[inline]
+fn prefetch_write<T>(r: &T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never faults and `r` is a valid reference anyway.
+    unsafe {
+        use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
+        _mm_prefetch::<_MM_HINT_ET0>(r as *const T as *const i8);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = r;
 }
 
 /// Starts loading the cache line holding `r`. A hint only: it never faults.

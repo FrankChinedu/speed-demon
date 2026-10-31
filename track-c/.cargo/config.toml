@@ -3,4 +3,4 @@
 # native forces the board to build on the scoring box, and x86-64-v3 runs on any
 # build machine (matters for PGO training runs).
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+prfchw"]
