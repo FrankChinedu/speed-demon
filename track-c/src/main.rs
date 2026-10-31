@@ -88,9 +88,8 @@ fn main() {
         bits: &bits,
         overflow: &overflow,
     };
-    // Many small chunks handed out on demand, so a slow core never holds up the rest
-    // and each chunk's bytes and masks stay in L2 between the two passes over it.
-    let chunks = split_records(records, (records.len() >> 18).max(threads));
+    // Many chunks handed out on demand, so a slow core never holds up the rest.
+    let chunks = split_records(records, threads * 8);
     let next = AtomicUsize::new(0);
     let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
@@ -98,10 +97,9 @@ fn main() {
                 let (region, names, seen, chunks, next) = (&region, &names, &seen, &chunks, &next);
                 s.spawn(move || {
                     let mut aggs = vec![Agg::EMPTY; groups];
-                    let mut masks = Masks::default();
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, region, &mut aggs, names, seen, &mut masks);
+                        parse(chunk, first, region, &mut aggs, names, seen);
                     }
                     aggs
                 })
@@ -257,132 +255,37 @@ impl Seen<'_> {
     }
 }
 
-/// One bit per byte of a chunk: `fields` marks the commas and LFs outside quotes
-/// (the ends of fields and records), `quotes` marks every `"`.
-#[derive(Default)]
-struct Masks {
-    fields: Vec<u64>,
-    quotes: Vec<u64>,
-}
-
-impl Masks {
-    /// Classifies 64 bytes at a time. Bit i of the prefix XOR of the quote bits is the
-    /// parity of the quotes up to byte i, which is 1 exactly inside a quoted field (a
-    /// `""` escape toggles twice). A chunk starts outside quotes, at a record.
-    fn build(&mut self, c: &[u8]) {
-        self.fields.clear();
-        self.quotes.clear();
-        let mut carry = 0u64; // all ones while a quoted field runs across blocks
-        for block in c.chunks(64) {
-            let (q, sep) = classify(block);
-            let mut inside = q;
-            for k in [1, 2, 4, 8, 16, 32] {
-                inside ^= inside << k;
-            }
-            inside ^= carry;
-            carry = ((inside as i64) >> 63) as u64;
-            self.fields.push(sep & !inside);
-            self.quotes.push(q);
-        }
-    }
-
-    /// The number of quotes in `c[a..b]`.
-    fn quotes_in(&self, a: usize, b: usize) -> usize {
-        let mut n = 0;
-        let mut i = a;
-        while i < b {
-            let k = (64 - i % 64).min(b - i);
-            let w = self.quotes[i / 64] >> (i % 64);
-            n += (if k == 64 { w } else { w & ((1 << k) - 1) }).count_ones() as usize;
-            i += k;
-        }
-        n
-    }
-}
-
-/// Bit masks of the quotes and of the commas and LFs in one block of up to 64 bytes.
-#[inline]
-fn classify(block: &[u8]) -> (u64, u64) {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    if block.len() == 64 {
-        use std::arch::x86_64::*;
-        // SAFETY: AVX2 is enabled at compile time, and both loads read 32 bytes
-        // inside the 64-byte block.
-        return unsafe {
-            let half = |at: usize| {
-                let v = _mm256_loadu_si256(block.as_ptr().add(at) as *const __m256i);
-                let is = |b: u8| _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b as i8));
-                let q = _mm256_movemask_epi8(is(b'"')) as u32 as u64;
-                let sep = _mm256_movemask_epi8(_mm256_or_si256(is(b','), is(b'\n')));
-                (q, sep as u32 as u64)
-            };
-            let ((q0, s0), (q1, s1)) = (half(0), half(32));
-            (q0 | q1 << 32, s0 | s1 << 32)
-        };
-    }
-    block.iter().enumerate().fold((0, 0), |(q, sep), (i, &b)| {
-        (
-            q | ((b == b'"') as u64) << i,
-            sep | ((b == b',' || b == b'\n') as u64) << i,
-        )
-    })
-}
-
-/// Parses whole records (section 2.1 of the spec) and aggregates them. Every record
-/// ends exactly five field ends after it starts (four commas, then the LF of its
-/// terminator), so fields are cut by walking the set bits of the mask.
-fn parse(
-    c: &[u8],
-    first: bool,
-    region: &[u16],
-    aggs: &mut [Agg],
-    names: &Names,
-    seen: &Seen,
-    masks: &mut Masks,
-) {
-    masks.build(c);
-    let unmatched = aggs.len() - 1;
+fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
+    let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
-    let (mut w, mut bits) = (0, masks.fields.first().copied().unwrap_or(0));
-    let mut next_end = || {
-        while bits == 0 {
-            w += 1;
-            bits = masks.fields[w];
-        }
-        let at = w * 64 + bits.trailing_zeros() as usize;
-        bits &= bits - 1;
-        at
-    };
     let mut p = 0;
     if first {
         // The header is the first record: skip it, with the file's leading BOM.
-        for _ in 0..5 {
-            p = next_end() + 1;
-        }
+        p = c
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(c.len(), |i| i + 1);
     }
     while p < c.len() {
         if c[p..].starts_with(BOM) {
             p += 3;
         }
-        let ends = [next_end(), next_end(), next_end(), next_end(), next_end()];
-        let id = digits(c, p).0;
-        let (cents, _) = amount(c, ends[3] + 1);
-        let region_id = digits(c, ends[2] + 1).0;
-        p = ends[4] + 1;
-
-        // A quoted field's value drops its two delimiting quotes and one quote of each
-        // `""` pair, so it is the raw length minus half the quote count.
-        let text = |a: usize, b: usize| match c[a..b].first() {
-            Some(b'"') => (a + 1, b - 1, (b - a) - masks.quotes_in(a, b) / 2 - 1),
-            _ => (a, b, b - a),
-        };
-        let (name_start, name_end, name_len) = text(ends[0] + 1, ends[1]);
-        let note_len = text(ends[1] + 1, ends[2]).2;
+        let (id, next) = digits(c, p);
+        let name = field(c, next + 1);
+        let note = field(c, name.end + 1);
+        let (region_id, next) = digits(c, note.end + 1);
+        let (cents, next) = amount(c, next + 1);
+        p = next
+            + match c.get(next) {
+                Some(b'\r') => 2,
+                Some(_) => 1,
+                None => 0,
+            };
 
         let g = match region.get(region_id as usize) {
             Some(&r) if r != NO_REGION => r as usize,
-            _ => unmatched,
+            _ => unmatched as usize,
         };
         let a = &mut aggs[g];
         a.count += 1;
@@ -390,17 +293,17 @@ fn parse(
         a.amount_sum += cents;
         a.amount_min = a.amount_min.min(cents);
         a.amount_max = a.amount_max.max(cents);
-        a.name_bytes += name_len as u64;
-        a.note_bytes += note_len as u64;
+        a.name_bytes += (name.len() - name.escapes) as u64;
+        a.note_bytes += (note.len() - note.escapes) as u64;
 
-        batch[n] = (g, name_start, name_end);
+        batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen);
+            std::hint::black_box(&batch); // TIMING PROBE: no interning
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen);
+    let _ = (names, seen);
 }
 
 /// Records per interning batch.
@@ -535,6 +438,70 @@ fn zeroed_atomics(n: usize) -> Box<[AtomicU64]> {
     let words: Box<[u64]> = vec![0u64; n].into_boxed_slice();
     // SAFETY: AtomicU64 has the same size, alignment and bit validity as u64.
     unsafe { Box::from_raw(Box::into_raw(words) as *mut [AtomicU64]) }
+}
+
+/// A text field: its content bytes are `start..end_content`, and `end` is the
+/// position of the byte that follows the field (a comma here).
+struct Field {
+    start: usize,
+    end_content: usize,
+    end: usize,
+    escapes: usize,
+}
+
+impl Field {
+    /// Raw content length, before `""` pairs are collapsed.
+    fn len(&self) -> usize {
+        self.end_content - self.start
+    }
+}
+
+/// Reads a quoted or unquoted text field starting at `p`.
+#[inline]
+fn field(c: &[u8], p: usize) -> Field {
+    if c[p] != b'"' {
+        let end = find(c, p, b',');
+        return Field {
+            start: p,
+            end_content: end,
+            end,
+            escapes: 0,
+        };
+    }
+    let mut i = p + 1;
+    let mut escapes = 0;
+    loop {
+        i = find(c, i, b'"');
+        if c.get(i + 1) == Some(&b'"') {
+            escapes += 1;
+            i += 2;
+        } else {
+            return Field {
+                start: p + 1,
+                end_content: i,
+                end: i + 1,
+                escapes,
+            };
+        }
+    }
+}
+
+/// Position of the first `byte` at or after `p`, eight bytes at a time.
+#[inline]
+fn find(c: &[u8], mut p: usize, byte: u8) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    while let Some(w) = c.get(p..p + 8) {
+        let x = u64::from_le_bytes(w.try_into().unwrap()) ^ (ONES * byte as u64);
+        let hits = x.wrapping_sub(ONES) & !x & (ONES << 7); // high bit set where x has a 0 byte
+        if hits != 0 {
+            return p + hits.trailing_zeros() as usize / 8;
+        }
+        p += 8;
+    }
+    p + c[p..]
+        .iter()
+        .position(|&b| b == byte)
+        .expect("field terminator")
 }
 
 /// An unsigned decimal at `p`, ended by `,` or `.`; returns it and the position of

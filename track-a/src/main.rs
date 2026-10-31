@@ -252,7 +252,7 @@ fn parse(
     registry: &Mutex<Registry>,
 ) -> Vec<Hour> {
     let mut table = Endpoints {
-        slots: vec![(0, 0); 2 * MAX_ENDPOINTS],
+        slots: vec![0; 2 * MAX_ENDPOINTS],
         registry,
     };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
@@ -390,12 +390,14 @@ fn fmix(mut h: u64) -> u64 {
     h ^ h >> 33
 }
 
-/// A thread's endpoint table, keyed by a strong 64-bit hash of the name alone: bytes
-/// are never compared on the hot path. Two of the 1,842 names sharing a hash has odds
-/// of about 1e-13 per run. New names take a global id from the shared registry, which
-/// does compare bytes, so a collision between names it sees is caught.
+/// A thread's endpoint table, keyed by hash alone: bytes are never compared on the hot
+/// path. A slot is one word, the hash's top 32 bits above the id, so the table is
+/// 32 KB and stays in L1. With the 12 bits that pick the first slot, a name is
+/// identified by 44 hash bits: two of the 1,842 names sharing them has odds of about
+/// 1e-7 per run. New names take a global id from the shared registry, which compares
+/// bytes, so a collision between names it sees is caught.
 struct Endpoints<'a> {
-    slots: Vec<(u64, u32)>, // (hash, id); hash 0 marks an empty slot
+    slots: Vec<u64>, // hash tag << 32 | (id + 1); 0 marks an empty slot
     registry: &'a Mutex<Registry>,
 }
 
@@ -403,13 +405,14 @@ impl Endpoints<'_> {
     #[inline]
     fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
+        let tag = h >> 32 << 32;
         let mut i = h as usize & mask;
         loop {
-            let (sh, id) = self.slots[i];
-            if sh == h {
-                return id;
+            let slot = self.slots[i];
+            if slot >> 32 << 32 == tag && slot != 0 {
+                return slot as u32 - 1;
             }
-            if sh == 0 {
+            if slot == 0 {
                 break;
             }
             i = (i + 1) & mask;
@@ -431,7 +434,7 @@ impl Endpoints<'_> {
                 id
             }
         };
-        self.slots[i] = (h, id);
+        self.slots[i] = tag | (id as u64 + 1);
         id
     }
 }
