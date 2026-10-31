@@ -11,8 +11,7 @@
 //! name fields have equal values exactly when their raw bytes are equal (an unquoted
 //! field cannot hold `"`, and `""` -> `"` is one-to-one). All threads intern names by
 //! a 64-bit hash of their raw bytes in one lock-free table that hands out dense ids,
-//! and each country keeps a bitset of the ids it has seen, written only by the
-//! thread that owns the country.
+//! and each country keeps a bitset of the ids it has seen.
 
 mod mmap;
 
@@ -29,7 +28,7 @@ fn mix(h: u64, w: u64) -> u64 {
 }
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
-const NO_REGION: u8 = u8::MAX;
+const NO_REGION: u16 = u16::MAX;
 /// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
 const NAME_SLOTS: usize = 1 << 18;
 /// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
@@ -85,10 +84,8 @@ fn main() {
     let names = Names::new();
     let bits = zeroed_atomics(groups * MAX_IDS / 64);
     let overflow = Mutex::new(Vec::new());
-    let inboxes: Vec<_> = (0..threads).map(|_| Mutex::new(Vec::new())).collect();
     let seen = Seen {
         bits: &bits,
-        inboxes: &inboxes,
         overflow: &overflow,
     };
     // Many chunks handed out on demand, so a slow core never holds up the rest.
@@ -96,21 +93,13 @@ fn main() {
     let next = AtomicUsize::new(0);
     let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
-            .map(|me| {
+            .map(|_| {
                 let (region, names, seen, chunks, next) = (&region, &names, &seen, &chunks, &next);
                 s.spawn(move || {
                     let mut aggs = vec![Agg::EMPTY; groups];
-                    let mut outbox = Outbox {
-                        me,
-                        bufs: vec![Vec::with_capacity(PAIRS); threads],
-                    };
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, region, &mut aggs, names, seen, &mut outbox);
-                        seen.drain(me);
-                    }
-                    for o in 0..threads {
-                        seen.flush(&mut outbox, o);
+                        parse(chunk, first, region, &mut aggs, names, seen);
                     }
                     aggs
                 })
@@ -123,13 +112,6 @@ fn main() {
             }
         }
         total
-    });
-    // Pairs handed over after their owner's last chunk.
-    thread::scope(|s| {
-        for me in 0..threads {
-            let seen = &seen;
-            s.spawn(move || seen.drain(me));
-        }
     });
     let mut overflow = overflow.into_inner().unwrap();
     overflow.sort_unstable();
@@ -189,7 +171,7 @@ fn main() {
 /// regions.csv: `region_id,country` lines after a header, ids ascending, codes
 /// `[A-Z]{3}`. Returns the distinct country codes and a dense region id -> country
 /// index table. Codes index a 26^3 table directly, so there is no hashing.
-fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u8>) {
+fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u16>) {
     let mut codes: Vec<&[u8]> = Vec::new();
     let mut by_code = vec![NO_REGION; 26 * 26 * 26];
     // Ids ascend, so the last line holds the largest: size the table once.
@@ -205,8 +187,7 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u8>) {
         let code = &text[comma + 1..comma + 4];
         let key = code.iter().fold(0, |k, &b| k * 26 + (b - b'A') as usize);
         if by_code[key] == NO_REGION {
-            assert!(codes.len() < NO_REGION as usize, "too many countries");
-            by_code[key] = codes.len() as u8;
+            by_code[key] = codes.len() as u16;
             codes.push(code);
         }
         region[id as usize] = by_code[key];
@@ -243,76 +224,39 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 }
 
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
-/// Where each (country, name id) pair is recorded: one bit per pair, in one table
-/// for all threads. Country g's row belongs to thread `g % threads`, the only one that
-/// writes it, so a bit is set with a plain load and store: no locked instruction and
-/// no cache line moving between cores. Other threads hand pairs to the owner in blocks.
+/// Where each (country, name id) pair is recorded: one bit per pair, shared by all
+/// threads, so its memory does not grow with the number of threads.
 struct Seen<'a> {
     bits: &'a [AtomicU64],
-    inboxes: &'a [Mutex<Vec<Vec<u32>>>],
     overflow: &'a Mutex<Vec<(usize, u32)>>,
-}
-
-/// Pairs per handed-over block.
-const PAIRS: usize = 1024;
-
-/// One thread's pairs waiting for each owner, packed `country << 17 | id`.
-struct Outbox {
-    me: usize,
-    bufs: Vec<Vec<u32>>,
 }
 
 impl Seen<'_> {
     #[inline]
-    fn send(&self, out: &mut Outbox, g: usize, id: u32) {
-        if id as usize >= MAX_IDS {
-            self.overflow.lock().unwrap().push((g, id));
-            return;
-        }
-        let o = g % self.inboxes.len();
-        out.bufs[o].push((g as u32) << MAX_IDS.trailing_zeros() | id);
-        if out.bufs[o].len() == PAIRS {
-            self.flush(out, o);
+    fn prefetch(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            prefetch(&self.bits[(g * MAX_IDS + id as usize) / 64]);
         }
     }
 
-    fn flush(&self, out: &mut Outbox, o: usize) {
-        let pairs = std::mem::replace(&mut out.bufs[o], Vec::with_capacity(PAIRS));
-        if o == out.me {
-            self.apply(&pairs);
-        } else if !pairs.is_empty() {
-            self.inboxes[o].lock().unwrap().push(pairs);
-        }
-    }
-
-    /// Sets the bits of every pair handed to thread `me` so far.
-    fn drain(&self, me: usize) {
-        for pairs in std::mem::take(&mut *self.inboxes[me].lock().unwrap()) {
-            self.apply(&pairs);
-        }
-    }
-
-    /// Only the owner of the pairs' countries calls this.
-    fn apply(&self, pairs: &[u32]) {
-        for &v in pairs {
-            let bit =
-                (v as usize >> MAX_IDS.trailing_zeros()) * MAX_IDS + (v as usize & (MAX_IDS - 1));
+    #[inline]
+    fn insert(&self, g: usize, id: u32) {
+        if (id as usize) < MAX_IDS {
+            let bit = g * MAX_IDS + id as usize;
+            // Skip the atomic write, and the cache-line transfer it forces, when the
+            // pair is already recorded.
             let word = &self.bits[bit / 64];
-            word.store(word.load(Relaxed) | 1 << (bit % 64), Relaxed);
+            if word.load(Relaxed) & 1 << (bit % 64) == 0 {
+                word.fetch_or(1 << (bit % 64), Relaxed);
+            }
+        } else {
+            self.overflow.lock().unwrap().push((g, id));
         }
     }
 }
 
-fn parse(
-    c: &[u8],
-    first: bool,
-    region: &[u8],
-    aggs: &mut [Agg],
-    names: &Names,
-    seen: &Seen,
-    outbox: &mut Outbox,
-) {
-    let unmatched = aggs.len() - 1;
+fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
+    let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
     let mut p = 0;
@@ -341,7 +285,7 @@ fn parse(
 
         let g = match region.get(region_id as usize) {
             Some(&r) if r != NO_REGION => r as usize,
-            _ => unmatched,
+            _ => unmatched as usize,
         };
         let a = &mut aggs[g];
         a.count += 1;
@@ -355,27 +299,22 @@ fn parse(
         batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen, outbox);
+            intern(c, &batch, names, seen);
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen, outbox);
+    intern(c, &batch[..n], names, seen);
 }
 
 /// Records per interning batch.
 const BATCH: usize = 32;
 
-/// Interns a batch of (country, name start, name end) and hands each pair to its
-/// country's owner. Every lookup is a likely cache miss into the shared table, so it
-/// goes in passes: hash and prefetch every slot, then resolve the ids. The misses of
-/// one pass overlap instead of each record waiting for its own.
-fn intern(
-    c: &[u8],
-    batch: &[(usize, usize, usize)],
-    names: &Names,
-    seen: &Seen,
-    outbox: &mut Outbox,
-) {
+/// Interns a batch of (country, name start, name end) and marks each pair seen. Every
+/// lookup is a likely cache miss into the shared tables, so they go in passes: hash
+/// and prefetch every slot, then resolve the ids and prefetch their bitset words,
+/// then set the bits. The misses of one pass overlap instead of each record waiting
+/// for its own.
+fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
         *h = Names::hash(c, start, end - start);
@@ -384,7 +323,10 @@ fn intern(
     let mut ids = [0u32; BATCH];
     for ((id, &h), &(g, ..)) in ids.iter_mut().zip(&hashes).zip(batch) {
         *id = names.id(h);
-        seen.send(outbox, g, *id);
+        seen.prefetch(g, *id);
+    }
+    for (&id, &(g, ..)) in ids.iter().zip(batch) {
+        seen.insert(g, id);
     }
 }
 
