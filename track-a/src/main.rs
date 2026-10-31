@@ -217,7 +217,7 @@ impl Scratch {
                     lat[*at as usize] = r & LAT_MASK;
                     *at += 1;
                 }
-                mmap::release(block);
+                let _ = block;
             }
             for (e, l) in p.big {
                 let at = &mut end[rank[e as usize] as usize];
