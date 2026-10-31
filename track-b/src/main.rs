@@ -239,7 +239,7 @@ fn main() {
                         terms.clear();
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
                         let mut per_doc: Vec<u32> = Vec::new();
-                        let mut matches = Vec::new();
+                        let mut matches: Vec<(u32, u32)> = Vec::new();
                         let mut base = None;
                         for_each_doc(chunk, |doc, text| {
                             base.get_or_insert(doc);
