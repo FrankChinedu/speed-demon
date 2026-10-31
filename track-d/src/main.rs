@@ -186,6 +186,9 @@ fn main() {
         .map_or(1, |n| n.get())
         .min(12);
     let graph = load_graph(mmap::map(&data.join("graph.txt")), threads);
+    std::hint::black_box(&graph);
+    std::fs::write(out.join("distances.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     let queries: Vec<(u32, u32)> = (mmap::map(&data.join("queries.txt")).split(|&b| b == b'\n'))
         .filter(|l| !l.is_empty())
         .map(|l| {

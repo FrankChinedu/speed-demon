@@ -10,7 +10,6 @@ use std::path::Path;
 
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
 const PROT_READ: i32 = 1;
@@ -38,23 +37,6 @@ pub fn map(path: &Path) -> &'static [u8] {
     assert!(ptr as isize != -1, "mmap {} failed", path.display());
     // SAFETY: the mapping is valid for `len` bytes and lives until the process exits.
     unsafe { std::slice::from_raw_parts(ptr, len) }
-}
-
-/// Maps every page under `part` (a piece of a `map` result) in one system call
-/// instead of one page fault per few pages. Linux 5.14 and later; elsewhere, or if
-/// refused, the pages simply fault in as they are read.
-pub fn populate(part: &[u8]) {
-    #[cfg(target_os = "linux")]
-    {
-        const MADV_POPULATE_READ: i32 = 22;
-        let start = part.as_ptr() as usize & !4095;
-        let len = part.as_ptr() as usize + part.len() - start;
-        // SAFETY: the range lies inside a live read-only file mapping (rounded down to
-        // its page, which belongs to the same mapping), and populating changes no data.
-        unsafe { madvise(start as *mut u8, len, MADV_POPULATE_READ) };
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = part;
 }
 
 /// Opts this process out of transparent huge pages. With THP on, the first byte a
