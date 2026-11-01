@@ -377,3 +377,7 @@ bfafaeb	d	run-23b89a4be2b5	0.2199	129.0	542	18.31	in-edges read back from the ou
 8ce6ac2	b	run-463b8ed9da48	0.2958	80.7	907	18.93	BOOL queries evaluated on each chunk while its index is in cache, index dropped, per-thread summaries merged: M 88.2 -> 80.7, T 0.2958 (same as recent samples)
 8ce6ac2	c	run-4d9308ec06aa	0.0406	11.1	515	30.08	
 8ce6ac2	d	run-3ead8c2a70bd	0.2200	127.7	541	18.34	in-edges from the out rows, second sample: 0.2200 again, no faster than the second parse; reverted
+165fb12	a	run-9665347884c5	0.0289	21.1	548	38.06	
+165fb12	b	run-c11d1e528ebf	0.3047	85.5	923	18.39	
+165fb12	c	run-dc183b460665	0.0406	11.3	515	29.94	
+165fb12	d	run-24e72fc43c94	0.2258	126.9	521	18.24	
