@@ -275,7 +275,7 @@ struct Shared<'a> {
 
 /// Bitset shards, and pairs queued per shard before a thread applies them.
 const SHARDS: usize = 16;
-const QUEUE: usize = 256;
+const QUEUE: usize = 512;
 
 impl Shared<'_> {
     /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,
@@ -353,7 +353,7 @@ fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut 
 }
 
 /// Records per interning batch.
-const BATCH: usize = 16;
+const BATCH: usize = 32;
 
 /// Interns a batch of (country, name start, name end) and queues each pair to be
 /// marked seen. Every lookup is a likely cache miss into the shared name table, so

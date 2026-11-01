@@ -381,9 +381,9 @@ bfafaeb	d	run-23b89a4be2b5	0.2199	129.0	542	18.31	in-edges read back from the ou
 165fb12	b	run-c11d1e528ebf	0.3047	85.5	923	18.39	last document and count side by side, chunk index buffers reused: T 0.3047, M 80.7 -> 85.5 (reused Vecs grow by doubling)
 165fb12	c	run-dc183b460665	0.0406	11.3	515	29.94	
 165fb12	d	run-24e72fc43c94	0.2258	126.9	521	18.24	back to the second parse (same code as 0559a7e): 0.2258, so D now samples ~0.22 either way
-529b16e	a	run-7aeb25c85f14	0.0293	23.5	526	37.22	
+529b16e	a	run-7aeb25c85f14	0.0293	23.5	526	37.22	FAILED TUNING: 256 KB read chunks: 0.0293 and 0.0275 (with f6cc5dc) against ~0.027, M +1 MB; reverted
 529b16e	b	run-1561581721e1	0.2854	86.1	932	18.95	tokens walked boundary by boundary, hit-first lookup (9327878): 0.2854; x86 A/B 1.018x, CI 1.012-1.025
-529b16e	c	run-36b1c4a30c6c	0.0410	11.2	515	29.85	
+529b16e	c	run-36b1c4a30c6c	0.0410	11.2	515	29.85	FAILED TUNING: interning batches of 16: 0.0410 and 0.0409, no change; reverted
 529b16e	d	run-fb24a58b1209	0.2411	124.6	521	17.71	second parse (code unchanged since 0559a7e): 0.2411, board noise on D; x86 A/B puts in-edges-from-rows (7362b59) at 1.073x over this
 ffbc9b1	a	run-e3b35a53c6f0	0.0281	23.3	526	38.13	
 ffbc9b1	b	run-467e344c1143	0.2838	81.0	920	19.28	chunk index allocated per chunk again (side-by-side last document and count kept): M 86.1 -> 81.0, T 0.2838; x86 A/B vs reuse 1.001x (no difference)
@@ -393,7 +393,7 @@ ffbc9b1	d	run-b057b94f104b	0.2129	129.1	541	18.61	in-edges read back from the ou
 09b5340	c	run-ed9aa84a8649	0.0416	10.5	515	30.00	
 09b5340	d	run-483d2267abd5	0.2254	127.7	541	18.13	code unchanged from 6753993
 09b5340	b	run-093e92657a78	0.1480	41.8	-	-	TIMING PROBE (fails the hash on purpose): tokenizing only with the boundary walk: 148 ms (153.8 before); the full run is ~284, so postings, phrases, scatter and queries cost ~136 ms
-f6cc5dc	a	run-2c4522dc84c2	0.0275	23.3	526	38.54	
+f6cc5dc	a	run-2c4522dc84c2	0.0275	23.3	526	38.54	code of 529b16e (second sample)
 f6cc5dc	b	run-cf8c5529a0a8	0.2735	83.6	959	19.39	compact 1 MB term table (x86 A/B 1.017x) and bitmaps above 1/64 of a chunk (1.023x; 1/256 was 0.958x): 0.2735, M 83.6
-f6cc5dc	c	run-ade2730ae19d	0.0409	11.0	515	29.99	
+f6cc5dc	c	run-ade2730ae19d	0.0409	11.0	515	29.99	code of 529b16e (second sample)
 f6cc5dc	d	run-913b74adc131	0.1959	127.0	541	19.46	code unchanged from 6753993 (in-edges from the out rows): 0.1959, best so far

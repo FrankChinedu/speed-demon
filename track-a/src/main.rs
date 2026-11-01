@@ -32,7 +32,7 @@ const LAT_BITS: u32 = 21;
 const LAT_MASK: u32 = (1 << LAT_BITS) - 1;
 const MAX_ENDPOINTS: usize = 1 << (32 - LAT_BITS);
 /// Records are claimed from their hour's mapping in blocks of 1,024 (one 4 KB page).
-const BLOCK: usize = 1 << 10;
+const BLOCK: usize = 1 << 9;
 
 /// One hour's records from every thread, in one mapping reserved at the start. A
 /// thread claims a block of BLOCK records with one atomic add and fills it alone.
@@ -272,7 +272,7 @@ impl Scratch {
 
 /// Bytes of the file per chunk: a chunk owns the lines that start in it. Small enough
 /// that a thread's buffer stays in its core's L2 between the read and the parse.
-const CHUNK: usize = 1 << 18;
+const CHUNK: usize = 1 << 17;
 /// Read past a chunk's end, so its last line is whole: longer than any line, which is
 /// at most 27 + 7 + 125 + 3 + 10 bytes plus five separators.
 const SLACK: usize = 256;
