@@ -350,3 +350,7 @@ dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53
 6de5579	b	run-b26536ac6174	0.3017	99.6	866	18.10	
 6de5579	c	run-216886e90743	0.0425	11.0	608	28.67	FAILED EXPERIMENT: regions.csv loaded by all threads in two passes: no gain (two more thread spawns cost what it saved), +41 lines; reverted
 6de5579	d	run-53e8f5ff6885	0.1967	159.7	507	18.73	
+7561665	a	run-60cc758f06f5	0.0276	21.8	570	38.49	
+7561665	b	run-8cb3a5960402	0.2919	99.5	866	18.41	
+7561665	c	run-665ec2541678	0.0409	10.8	565	29.70	
+7561665	d	run-a62c8deb63af	0.1982	159.4	507	18.67	
