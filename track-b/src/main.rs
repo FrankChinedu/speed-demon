@@ -399,7 +399,7 @@ impl Postings {
     fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
         let n_bool = self.seen.len();
         let words = n_docs.div_ceil(64);
-        // Dense terms (in more than 1/64 of the documents) become bitmaps and get an
+        // Dense terms (in more than 1/256 of the documents) become bitmaps and get an
         // empty list range.
         let mut offsets = vec![0u32; n_bool + 1];
         let mut dense = Vec::new();
@@ -408,7 +408,7 @@ impl Postings {
         let mut total = 0;
         for (b, (_, c)) in self.seen.iter_mut().enumerate() {
             offsets[b] = total;
-            if *c as usize * 64 > n_docs {
+            if *c as usize * 256 > n_docs {
                 slot[b] = (dense.len() * words) as u32;
                 dense.push((b as u32, slot[b]));
                 is_dense[b / 64] |= 1 << (b % 64);
