@@ -473,3 +473,7 @@ bea6fc6	d	run-fe4f72d93974	0.2503	128.0	541	17.19	code unchanged from 6753993 (0
 980f7e2	b	run-2e066b2c521a	0.2400	61.6	1007	21.84	EXPERIMENT: four chunks per thread with shared summaries: T 0.2400, M 61.6, K 21.84; back to six
 980f7e2	c	run-b1e0fc4502ad	0.0397	11.3	529	30.13	
 980f7e2	d	run-113ff5d76f41	0.2027	125.6	541	19.18	code unchanged from 6753993
+d9cdcc7	a	run-3374c0a7620e	0.0280	21.5	522	38.78	
+d9cdcc7	b	run-b6fb144e1767	0.2450	48.6	1007	22.67	six chunks per thread with shared summaries, final setting (second sample): 0.2450, M 48.6, K 22.67
+d9cdcc7	c	run-b866eb79e1c1	0.0410	10.9	529	29.86	
+d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
