@@ -38,3 +38,21 @@ pub fn map(path: &Path) -> &'static [u8] {
     // SAFETY: the mapping is valid for `len` bytes and lives until the process exits.
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
+
+/// Makes every thread allocate from glibc's one main arena instead of an arena of its
+/// own. With transparent huge pages on, a thread arena that grows past 2 MB can be
+/// backed by huge pages charged whole. The workers allocate a few buffers per chunk,
+/// so sharing one arena costs nothing measurable. Call before any thread starts. A
+/// no-op off Linux.
+pub fn one_arena() {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_ARENA_MAX: i32 = -8;
+        // SAFETY: mallopt only sets an allocator tuning parameter, and runs before
+        // any thread is started.
+        unsafe { mallopt(M_ARENA_MAX, 1) };
+    }
+}

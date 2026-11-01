@@ -217,12 +217,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
-    // Worker stacks of 256 KB instead of Rust's default 2 MB. With transparent huge
-    // pages on, a 2 MB stack mapping can be backed by one huge page, charged whole on
-    // first touch: up to 24 MB of peak memory for 12 threads that use a few KB each.
-    // SAFETY: no other thread exists yet, so nothing reads the environment while it
-    // changes; std reads this variable once, at the first spawn.
-    unsafe { std::env::set_var("RUST_MIN_STACK", "262144") };
+    mmap::one_arena();
     let plan = plan(mmap::map(&data.join("queries.txt")));
     let docs = mmap::map(&data.join("docs.txt"));
     let threads = thread::available_parallelism()
