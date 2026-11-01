@@ -362,3 +362,7 @@ bc5e6ce	a	run-453835a024df	0.0273	22.9	526	38.76	summary hours written outside t
 bc5e6ce	b	run-99be49d4aabd	0.3369	99.2	866	17.14	
 bc5e6ce	c	run-43f317ca7e9f	0.0417	10.5	515	30.00	code unchanged from 1fa8e0d
 bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39	
+5042f52	a	run-497704d6b76a	0.0273	22.0	526	39.09	
+5042f52	c	run-e6b15ad2b876	0.0410	10.7	515	30.13	
+5042f52	d	run-7619465cb5d5	0.2152	127.1	509	18.73	16-byte rows of four u32 edges ((head + 1) << 11 | weight), one direction built at a time (text parsed again): M 159.7 -> 127.1, T within noise
+5042f52	b	run-e94923ac235b	0.2133	98.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the corpus pass: 213 ms, so the merge and queries cost ~80-120 ms (full runs measure 0.29-0.34 s)
