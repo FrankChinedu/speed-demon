@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 0cde2f9)
+HEAD is now at 0cde2f9 Track B: unchecked indexing where the index is in range by construction (masked table probe, per-document hash buffer, postings entry), each with its SAFETY argument
+$ cargo build --release -q
+### A/B track b: base 05e2e2a vs head 0cde2f9
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 877.64 | 872.19 | OK |
+| head | 865.06 | 859.89 | OK |
+
+speedup base/head 1.015, 95% CI [1.009, 1.020]: **head FASTER**
