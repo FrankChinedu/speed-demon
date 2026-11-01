@@ -258,3 +258,6 @@ e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
 1abd716	b	run-e0bc6961e115	0.2967	99.3	866	18.27	
 1abd716	c	run-7bcd424bccf7	0.0578	11.9	513	24.86	FAILED EXPERIMENT: region join batched with the name lookups (region slot prefetched): within noise, +19 lines; reverted
 1abd716	d	run-30cadb135899	0.1948	159.7	507	18.82	
+3dfa93b	b	run-1163796d5990	0.2963	100.2	866	18.24	
+3dfa93b	c	run-dfda535984a0	0.0550	11.3	506	25.79	AVX2 field scan, 32 bytes per step
+3dfa93b	d	run-c59ab0a59c9f	0.2046	159.6	507	18.37	

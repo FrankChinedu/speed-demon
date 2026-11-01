@@ -73,29 +73,6 @@ fn main() {
 
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
     let next = AtomicUsize::new(0);
-    {
-        // TIMING PROBE: pread the whole file in 128 KB chunks in parallel, nothing else
-        let sum = AtomicUsize::new(0);
-        thread::scope(|s| {
-            for _ in 0..threads {
-                let (input, next, sum) = (&input, &next, &sum);
-                s.spawn(move || {
-                    let mut buf = vec![0u8; CHUNK];
-                    loop {
-                        let start = next.fetch_add(1, Relaxed) * CHUNK;
-                        if start >= len {
-                            break;
-                        }
-                        let b = &mut buf[..CHUNK.min(len - start)];
-                        input.read_exact_at(b, start as u64).unwrap();
-                        sum.fetch_add(b[b.len() / 2] as usize, Relaxed);
-                    }
-                });
-            }
-        });
-        std::fs::write(out.join("summary.txt"), sum.into_inner().to_string()).unwrap();
-        std::process::exit(0);
-    }
     let registry = Mutex::new(Registry::default());
     let parts: Vec<Vec<Hour>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
