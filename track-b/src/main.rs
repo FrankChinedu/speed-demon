@@ -291,7 +291,7 @@ fn main() {
                             n_docs += 1;
                             ids.clear();
                             keys.clear();
-                            tokenize(text, &plan.table, &postings.seen, &mut scratch, &mut ids);
+                            tokenize(text, &plan.table, &mut scratch, &mut ids);
                             // Each token's BOOL posting (once per document) and whether a
                             // phrase is keyed on it, from its slot.
                             for (i, &t) in ids.iter().enumerate().filter(|(_, t)| **t != NONE) {
@@ -400,8 +400,8 @@ struct Postings {
     groups: Vec<Vec<u32>>,
     /// Per BOOL term: the offset of the last document of the chunk that gave it a
     /// posting (u16::MAX before the first), and its count in the chunk, side by side
-    /// in 4 bytes so a token touches one small cache line. The tokenizer prefetches a
-    /// token's entry when it finds its slot. The spare last entry is never written.
+    /// in 4 bytes so a token touches one small cache line. The spare last entry is
+    /// never written.
     seen: Vec<(u16, u16)>,
     shift: u32,
 }
@@ -843,13 +843,7 @@ fn hash(k: &Key) -> u64 {
 /// The term table does not fit in L2, so the lookups for a whole document go in
 /// stages: hash and slot prefetch for every token, then the probes. The misses of
 /// one stage overlap instead of each token waiting for its own.
-fn tokenize(
-    text: &[u8],
-    terms: &Table,
-    seen: &[(u16, u16)],
-    scratch: &mut Scratch,
-    slots: &mut Vec<u32>,
-) {
+fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
     token_mask(text, &mut scratch.mask);
     scratch.hashes.clear();
     let mut token = |start: usize, end: usize| {
@@ -881,17 +875,9 @@ fn tokenize(
         token(start, text.len());
     }
     slots.clear();
-    // Each found term's postings entry is prefetched for the loop that follows.
     slots.extend(scratch.hashes.iter().map(|&h| match h {
         0 => NONE,
-        h => {
-            let i = terms.find(h);
-            if i != NONE {
-                let b = (terms.slots[i as usize] & T_NO_BOOL) as usize;
-                prefetch(&seen[b.min(seen.len() - 1)]);
-            }
-            i
-        }
+        h => terms.find(h),
     }));
 }
 
