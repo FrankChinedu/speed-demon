@@ -453,21 +453,23 @@ impl Endpoints<'_> {
 }
 
 /// Nearest-rank p50, p95 and p99: the values at 1-indexed rank ceil(p * n / 100).
-/// Three nested selections instead of a sort, each on the part left of the last one.
+/// Three selections instead of a sort, each on the part right of the last one: the
+/// whole slice, then its upper half, then its top twentieth (about 1.55 slice lengths
+/// of work, where selecting p99 first and nesting leftwards costs about 2.9).
 fn percentiles(v: &mut [u32]) -> [u32; 3] {
     let n = v.len();
     let idx = |p: usize| (p * n).div_ceil(100) - 1;
     let (i50, i95, i99) = (idx(50), idx(95), idx(99));
-    let (left, &mut p99, _) = v.select_nth_unstable(i99);
-    let p95 = if i95 == i99 {
-        p99
+    let p50 = *v.select_nth_unstable(i50).1;
+    let p95 = if i95 == i50 {
+        p50
     } else {
-        *left.select_nth_unstable(i95).1
+        *v[i50 + 1..].select_nth_unstable(i95 - i50 - 1).1
     };
-    let p50 = if i50 == i95 {
+    let p99 = if i99 == i95 {
         p95
     } else {
-        *left[..i95].select_nth_unstable(i50).1
+        *v[i95 + 1..].select_nth_unstable(i99 - i95 - 1).1
     };
     [p50, p95, p99]
 }
