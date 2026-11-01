@@ -147,11 +147,7 @@ fn main() {
                 barrier.wait();
                 let sorted = sorted.get().unwrap();
                 let mut scratch = Scratch::new(sorted.0.len());
-                loop {
-                    let h = next_hour.fetch_add(1, Relaxed);
-                    if h >= HOURS {
-                        break;
-                    }
+                while let h @ 0..HOURS = next_hour.fetch_add(1, Relaxed) {
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
                     let lines = scratch.summarize(parts, &records[h], BASE + h as i64, sorted);
                     let mut w = writer.lock().unwrap();
