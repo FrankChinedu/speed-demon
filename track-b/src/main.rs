@@ -81,8 +81,8 @@ struct ChunkIndex<'a> {
     words: usize,
     seen: &'a [(u16, u16)],
     pos: &'a [u32],
-    docs: Vec<u16>,
-    bits: Vec<u64>,
+    docs: &'a [u16],
+    bits: &'a [u64],
 }
 
 const DENSE: u32 = 1 << 31;
@@ -258,18 +258,6 @@ fn main() {
             Query::Phrase(_) => None,
         })
         .collect();
-    // For each, a term every match must contain, or NONE: left to right, the result
-    // stays inside the first term's set until an OR, and inside the set of an AND
-    // term met after it. In a chunk where that term is absent the query is skipped.
-    let required: Vec<u32> = (bools.iter())
-        .map(|&(first, rest)| {
-            rest.iter().fold(first, |req, &(op, t)| match op {
-                Op::Or => NONE,
-                Op::And if req == NONE => t,
-                _ => req,
-            })
-        })
-        .collect();
 
     // The single pass over the corpus. Chunks are handed out dynamically. As soon as a
     // chunk is indexed, every BOOL query is evaluated on it while its index is still
@@ -280,8 +268,7 @@ fn main() {
     let partial: Vec<Vec<(u32, u32)>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
-                let (plan, chunks, next, bools, shared, required) =
-                    (&plan, &chunks, &next, &bools, &shared, &required);
+                let (plan, chunks, next, bools, shared) = (&plan, &chunks, &next, &bools, &shared);
                 s.spawn(move || {
                     let start = t * bools.len() / threads;
                     let mut matches = Vec::new();
@@ -295,6 +282,8 @@ fn main() {
                         seen: vec![(u16::MAX, 0); plan.n_bool + 1],
                         touched: Vec::new(),
                         pos: vec![0; plan.n_bool],
+                        docs: Vec::new(),
+                        bits: Vec::new(),
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
@@ -329,10 +318,6 @@ fn main() {
                         let ci = postings.index(base.unwrap_or(0), n_docs);
                         for k in 0..bools.len() {
                             let q = (k + start) % bools.len();
-                            let r = required[q];
-                            if r != NONE && ci.seen[r as usize].1 == 0 {
-                                continue;
-                            }
                             let (first, rest) = bools[q];
                             let mut result = Summary::default();
                             if rest.is_empty() {
@@ -434,6 +419,10 @@ struct Postings {
     /// Per BOOL term, meaningful only while its count is not 0: where its postings
     /// end in the chunk's list buffer, or DENSE | where its bitmap starts.
     pos: Vec<u32>,
+    /// The chunk's lists and bitmaps, reused from chunk to chunk: freeing them per
+    /// chunk unmapped them, and every unmap stops all cores for a TLB shootdown.
+    docs: Vec<u16>,
+    bits: Vec<u64>,
     shift: u32,
 }
 
@@ -471,8 +460,13 @@ impl Postings {
                 total += c;
             }
         }
-        let mut docs = vec![0u16; total as usize];
-        let mut bits = vec![0u64; dense * words];
+        let (docs, bits) = (&mut self.docs, &mut self.bits);
+        docs.clear();
+        docs.reserve_exact(total as usize);
+        docs.resize(total as usize, 0);
+        bits.clear();
+        bits.reserve_exact(dense * words);
+        bits.resize(dense * words, 0);
         for group in &mut self.groups {
             for &p in group.iter() {
                 let (d, b) = ((p >> 16) as usize, (p & 0xffff) as usize);
@@ -491,8 +485,8 @@ impl Postings {
             words,
             seen: &self.seen,
             pos: &self.pos,
-            docs,
-            bits,
+            docs: &self.docs,
+            bits: &self.bits,
         }
     }
 
