@@ -27,22 +27,6 @@ const NONE: u32 = u32::MAX;
 /// No query term is longer than 32 bytes, so a longer token can never match.
 const MAX_TERM: usize = 32;
 
-/// Token bytes are `a-z` and `0-9` after ASCII lowercasing; every other byte separates.
-const CLASS: [u8; 256] = {
-    let mut t = [0u8; 256];
-    let mut i = 0;
-    while i < 256 {
-        let b = i as u8;
-        t[i] = match b {
-            b'a'..=b'z' | b'0'..=b'9' => b,
-            b'A'..=b'Z' => b + 32,
-            _ => 0,
-        };
-        i += 1;
-    }
-    t
-};
-
 #[derive(Clone, Copy)]
 enum Op {
     And,
@@ -883,7 +867,7 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
     let tail = (!tail.is_empty()).then(|| {
         (tail.iter())
             .enumerate()
-            .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i)
+            .fold(0, |m, (i, &b)| m | (b.is_ascii_alphanumeric() as u64) << i)
     });
     let masks = blocks.map(|b| block_mask(b.try_into().unwrap())).chain(tail);
     let (mut carry, mut start) = (0, usize::MAX);
@@ -982,37 +966,24 @@ fn block_mask(block: &[u8; 64]) -> u64 {
     block
         .iter()
         .enumerate()
-        .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i)
+        .fold(0, |m, (i, &b)| m | (b.is_ascii_alphanumeric() as u64) << i)
 }
 
 /// `out = a op b` on ascending, duplicate-free lists.
 fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     out.clear();
     match op {
+        // Lists are short (a term in more than 1/64 of a chunk is a bitmap), so plain
+        // merges, no galloping.
         Op::And => {
-            let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-            if small.len() * 16 < large.len() {
-                // Gallop the short list through the long one.
-                let mut lo = 0;
-                for &x in small {
-                    lo += large[lo..].partition_point(|&y| y < x);
-                    if lo == large.len() {
-                        break;
-                    }
-                    if large[lo] == x {
-                        out.push(x);
-                    }
+            let (mut i, mut j) = (0, 0);
+            while i < a.len() && j < b.len() {
+                let (x, y) = (a[i], b[j]);
+                if x == y {
+                    out.push(x);
                 }
-            } else {
-                let (mut i, mut j) = (0, 0);
-                while i < a.len() && j < b.len() {
-                    let (x, y) = (a[i], b[j]);
-                    if x == y {
-                        out.push(x);
-                    }
-                    i += (x <= y) as usize;
-                    j += (y <= x) as usize;
-                }
+                i += (x <= y) as usize;
+                j += (y <= x) as usize;
             }
         }
         Op::Or => {
@@ -1028,23 +999,13 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
             out.extend_from_slice(&b[j..]);
         }
         Op::Not => {
-            if b.len() > a.len() * 16 {
-                let mut lo = 0;
-                for &x in a {
-                    lo += b[lo..].partition_point(|&y| y < x);
-                    if lo == b.len() || b[lo] != x {
-                        out.push(x);
-                    }
+            let mut j = 0;
+            for &x in a {
+                while j < b.len() && b[j] < x {
+                    j += 1;
                 }
-            } else {
-                let mut j = 0;
-                for &x in a {
-                    while j < b.len() && b[j] < x {
-                        j += 1;
-                    }
-                    if j == b.len() || b[j] != x {
-                        out.push(x);
-                    }
+                if j == b.len() || b[j] != x {
+                    out.push(x);
                 }
             }
         }
