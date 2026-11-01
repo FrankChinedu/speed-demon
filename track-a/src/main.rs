@@ -16,6 +16,7 @@
 mod mmap;
 
 use std::fs::File;
+use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
@@ -86,6 +87,13 @@ struct Hour {
     errors: Vec<u16>,            // the endpoint of every 5xx line
 }
 
+/// Summary lines are written in hour order as hours finish, in any order.
+struct Writer {
+    next: usize,
+    done: Vec<Option<Vec<u8>>>,
+    busy: bool, // a thread is writing hours, outside the lock
+}
+
 fn main() {
     mmap::small_pages();
     let mut args = std::env::args().skip(1);
@@ -103,25 +111,24 @@ fn main() {
     let cap = len / 39 + (threads + 1) * BLOCK;
     let records: Vec<Records> = (0..HOURS).map(|_| Records::new(cap)).collect();
     let by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
-    // Read and write: the file is mapped shared, for writing, once its size is known.
-    let mut options = File::options();
-    let options = options.read(true).write(true).create(true).truncate(true);
-    let file = options
-        .open(out.join("summary.txt"))
-        .expect("create summary.txt");
-    let texts: Vec<Mutex<Vec<u8>>> = (0..HOURS).map(|_| Mutex::default()).collect();
-    let output: OnceLock<(usize, Vec<usize>)> = OnceLock::new(); // mapping, hour offsets
+    let file = File::create(out.join("summary.txt")).expect("create summary.txt");
+    let writer = Mutex::new(Writer {
+        next: 0,
+        done: vec![None; HOURS],
+        busy: false,
+    });
     // One set of threads for both phases: starting a second set, and each thread's
     // exit unmapping its stack (a TLB shootdown on every core), costs more than the
     // barrier between the phases.
     let barrier = Barrier::new(threads);
     let sorted: OnceLock<Sorted> = OnceLock::new();
-    let (next_hour, next_copy) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let next_hour = AtomicUsize::new(0);
     thread::scope(|s| {
         for _ in 0..threads {
             let (input, next, registry, records) = (&input, &next, &registry, &records);
-            let (by_hour, texts, barrier, sorted) = (&by_hour, &texts, &barrier, &sorted);
-            let (file, output, next_hour, next_copy) = (&file, &output, &next_hour, &next_copy);
+            let (by_hour, writer, barrier, sorted) = (&by_hour, &writer, &barrier, &sorted);
+            let file = &file;
+            let next_hour = &next_hour;
             s.spawn(move || {
                 let hours = parse(input, next, registry, records);
                 for (slot, hour) in by_hour.iter().zip(hours) {
@@ -147,39 +154,25 @@ fn main() {
                     }
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
                     let lines = scratch.summarize(parts, &records[h], BASE + h as i64, sorted);
-                    *texts[h].lock().unwrap() = lines;
-                }
-                // Every hour is formatted: size the file, map it, and copy the hours in
-                // parallel, each into its own range (no write calls, no writer queue).
-                if barrier.wait().is_leader() {
-                    let mut at = vec![0];
-                    for t in texts {
-                        at.push(at.last().unwrap() + t.lock().unwrap().len());
+                    let mut w = writer.lock().unwrap();
+                    w.done[h] = Some(lines);
+                    if w.busy {
+                        continue; // the writing thread will find it
                     }
-                    let total = *at.last().unwrap();
-                    file.set_len(total as u64).expect("size summary.txt");
-                    let base = if total == 0 {
-                        0
-                    } else {
-                        mmap::map_shared(file, total) as usize
-                    };
-                    output.set((base, at)).unwrap();
-                }
-                barrier.wait();
-                let (base, at) = output.get().unwrap();
-                loop {
-                    let h = next_copy.fetch_add(1, Relaxed);
-                    if h >= HOURS {
-                        break;
+                    // Write every hour that is next in order, outside the lock, so the
+                    // threads depositing hours meanwhile never wait for a write.
+                    w.busy = true;
+                    loop {
+                        let i = w.next;
+                        let Some(lines) = w.done.get_mut(i).and_then(Option::take) else {
+                            break;
+                        };
+                        w.next += 1;
+                        drop(w);
+                        (&*file).write_all(&lines).expect("write summary.txt");
+                        w = writer.lock().unwrap();
                     }
-                    let text = std::mem::take(&mut *texts[h].lock().unwrap());
-                    if !text.is_empty() {
-                        let to = (*base as *mut u8).wrapping_add(at[h]);
-                        // SAFETY: hour h's range at[h]..at[h + 1] is inside the mapping
-                        // (its length is the sum of all hours'), and only this thread
-                        // writes it.
-                        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), to, text.len()) };
-                    }
+                    w.busy = false;
                 }
             });
         }

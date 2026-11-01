@@ -16,8 +16,6 @@ pub fn small_pages() {
     }
 }
 
-use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::ptr::null_mut;
 
 unsafe extern "C" {
@@ -39,25 +37,6 @@ pub fn reserve(len: usize) -> *mut u8 {
     // nothing else in the process.
     let ptr = unsafe { mmap(null_mut(), len, PROT_READ_WRITE, ANON_NORESERVE, -1, 0) };
     assert!(ptr as isize != -1, "mmap of {len} bytes failed");
-    ptr
-}
-
-/// Maps the first `len` bytes of `file` for writing, shared with the file itself.
-pub fn map_shared(file: &File, len: usize) -> *mut u8 {
-    const MAP_SHARED: i32 = 1;
-    // SAFETY: a fresh shared mapping of an open file at least `len` bytes long; it
-    // overlaps nothing else in the process.
-    let ptr = unsafe {
-        mmap(
-            null_mut(),
-            len,
-            PROT_READ_WRITE,
-            MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    assert!(ptr as isize != -1, "mmap of the output failed");
     ptr
 }
 
