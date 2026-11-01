@@ -385,3 +385,7 @@ bfafaeb	d	run-23b89a4be2b5	0.2199	129.0	542	18.31	in-edges read back from the ou
 529b16e	b	run-1561581721e1	0.2854	86.1	932	18.95	tokens walked boundary by boundary, hit-first lookup (9327878): 0.2854; x86 A/B 1.018x, CI 1.012-1.025
 529b16e	c	run-36b1c4a30c6c	0.0410	11.2	515	29.85	
 529b16e	d	run-fb24a58b1209	0.2411	124.6	521	17.71	second parse (code unchanged since 0559a7e): 0.2411, board noise on D; x86 A/B puts in-edges-from-rows (7362b59) at 1.073x over this
+ffbc9b1	a	run-e3b35a53c6f0	0.0281	23.3	526	38.13	
+ffbc9b1	b	run-467e344c1143	0.2838	81.0	920	19.28	chunk index allocated per chunk again (side-by-side last document and count kept): M 86.1 -> 81.0, T 0.2838; x86 A/B vs reuse 1.001x (no difference)
+ffbc9b1	c	run-1c23a8c57c8f	0.0414	11.0	515	29.81	
+ffbc9b1	d	run-b057b94f104b	0.2129	129.1	541	18.61	in-edges read back from the out rows, restored (x86 A/B 1.073x over the second parse): 0.2129
