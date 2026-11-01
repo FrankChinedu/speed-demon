@@ -39,6 +39,11 @@ From Nov 1 afternoon, board noise on B (the same code measured 0.279 and 0.323 s
 | ec9a972 | Token hash by three folded 64x64 -> 128-bit multiplies instead of three multiplies and a MurmurHash3 finaliser | 1.002 (0.979-1.029) | no |
 | 0297d50 | The plan in parallel (flat per-thread parse, lock-free set of distinct terms) | 0.913 (0.903-0.923) on the 2-vCPU runner | no: a box probe put it at 19.9 ms against the serial 23.0, not worth 44 lines |
 | 8c7f960 | A per-thread direct-mapped cache of recent term lookups (2,048 entries, 32 KB) | 0.792 (0.781-0.799) | no |
+| 0cde2f9 | Unchecked indexing where the index is in range by construction (masked table probe, per-document hash buffer, postings entry), each with its SAFETY argument | 1.015 (1.009-1.020) | yes |
+| ccefbf8 | Skip the lookups of AND and NOT terms once a query's running result is an empty list | 0.999 (0.977-1.010) | no |
+
+Chunk count and the shared summaries could only be judged on the box (the 2-vCPU runner makes 30 chunks whatever the setting, and memory is the box's cgroup peak). Board runs, in order: per-thread summaries with 3, 5, 6, 8 and 12 chunks per thread gave M 91, 73, 67, 60 and 53 MB at T 0.239-0.274 s (eight best, K 21.38); packing count and sum into one word and sharing one summary per query across threads took eight per thread from 57.7 to 41.0 MB (K 22.16); with shared summaries, four, six and eight per thread gave 0.2400 s / 61.6 MB, 0.2435 s / 47.4 MB and 0.2667 s / 41.0 MB, so six (K 22.85).
+
 
 An x86 profile (`.github/workflows/prof.yml`, perf by source line on the runner) guided the last three rows: ~10% of the run on the postings-entry miss, ~10% on the term-table probe, ~15% in `Vec` push and extend paths, ~5% in the hash finaliser.
 
@@ -88,3 +93,18 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 09b5340 | TIMING PROBE (fails the hash on purpose): tokenizing only with the boundary walk: 148 ms (153.8 before); the full run is ~284, so postings, phrases, scatter and queries cost ~136 ms | run-093e92657a78 | 0.1480 | 41.8 | - | - |
 | f6cc5dc | compact 1 MB term table (x86 A/B 1.017x) and bitmaps above 1/64 of a chunk (1.023x; 1/256 was 0.958x): 0.2735, M 83.6 | run-cf8c5529a0a8 | 0.2735 | 83.6 | 959 | 19.39 |
 | ae1dbdb | results summarised in bulk once the ten smallest ids are known (popcounts for bitmap words; x86 A/B 1.074x): 0.2536, best so far | run-a92f27e7df26 | 0.2536 | 82.6 | 978 | 20.13 |
+| 1a58518 | postings entry (u16 last offset, u16 count), x86 A/B 1.012x: T 0.2641 (board noise), M 82.6 -> 77.8 | run-776e4ea7b7a4 | 0.2641 | 77.8 | 978 | 19.96 |
+| 5b22af8 | token mask walked as made (no mask buffer), hashes written by index (x86 A/B 1.066x): 0.2515, best so far | run-4008000a794b | 0.2515 | 80.5 | 975 | 20.32 |
+| ecdc8d2 | TIMING PROBE (fails the hash on purpose): exits after the plan: 23.0 ms of serial start-up (~9% of the run) | run-595ce917a2d1 | 0.0230 | 10.5 | - | - |
+| 35887e4 | code unchanged from 5b22af8 (resample): 0.2396 | run-a905e7520c5f | 0.2396 | 80.2 | 975 | 20.84 |
+| 230409a | TIMING PROBE (fails the hash on purpose, pushed as fb8320f): exits after the parallel plan (0297d50): 19.9 ms against the serial plan's 23.0, +44 lines; the parallel plan dropped | run-4b61a35a1d87 | 0.0199 | 20.5 | - | - |
+| f0410c0 | TIMING PROBE (fails the hash on purpose, pushed as a9dcca0): every chunk indexed, no query evaluated: 205 ms against ~240 for the full run, so the fused query evaluation costs ~35 ms | run-ce1a349b295c | 0.2051 | 80.3 | - | - |
+| 1b38a46 | unchecked indexing where in range by construction (x86 A/B 1.015x): 0.2668, a slow board sample | run-2007d990b500 | 0.2668 | 79.4 | 976 | 19.78 |
+| fec02e1 | EXPERIMENT: five chunks per thread: T 0.2446, M 73.2 (smaller per-thread buffers), K 21.00, best so far | run-215e302c1b8f | 0.2446 | 73.2 | 976 | 21.00 |
+| fd68fcc | EXPERIMENT: six chunks per thread: T 0.2475, M 67.3, K 21.23 | run-5ee6705ae703 | 0.2475 | 67.3 | 976 | 21.23 |
+| bea6fc6 | EXPERIMENT: eight chunks per thread: T 0.2550, M 60.4, K 21.38 | run-5f2b80fd3e88 | 0.2550 | 60.4 | 976 | 21.38 |
+| 0a4806e | EXPERIMENT: twelve chunks per thread: T 0.2743, M 53.1, K 21.15: past the best (eight); back to eight | run-0a55e9be56d4 | 0.2743 | 53.1 | 976 | 21.15 |
+| 0c26e3f | eight chunks per thread and the packed count/sum summary (pushed as 5c3f422): 0.2532, M 57.7, K 21.64, best so far | run-ff7cdeaf2606 | 0.2532 | 57.7 | 977 | 21.64 |
+| 440c037 | one shared summary per BOOL query (atomic count/sum, ten smallest under a per-query lock) instead of one per thread: M 57.7 -> 41.0, T 0.2667, K 22.16, best so far | run-d4460d2736f9 | 0.2667 | 41.0 | 1007 | 22.16 |
+| 13d1b99 | EXPERIMENT (pushed as d96fdfe): six chunks per thread with shared summaries: T 0.2435, M 47.4, K 22.85, best so far | run-246ec4cb0362 | 0.2435 | 47.4 | 1007 | 22.85 |
+| 980f7e2 | EXPERIMENT: four chunks per thread with shared summaries: T 0.2400, M 61.6, K 21.84; back to six | run-2e066b2c521a | 0.2400 | 61.6 | 1007 | 21.84 |
