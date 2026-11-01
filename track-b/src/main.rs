@@ -227,14 +227,27 @@ fn main() {
     // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
     let chunks = split_lines(docs, (threads * 4).max(docs.len() >> 23));
 
-    // The single pass over the corpus. Chunks are handed out dynamically.
+    // The BOOL queries, numbered in input order.
+    let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
+        .filter_map(|q| match q {
+            Query::Bool(first, rest) => Some((*first, &rest[..])),
+            Query::Phrase(_) => None,
+        })
+        .collect();
+
+    // The single pass over the corpus. Chunks are handed out dynamically, so each
+    // thread meets its chunks in ascending order. As soon as a chunk is indexed, every
+    // BOOL query is evaluated on it while its index is still in cache, and the index
+    // is dropped: each thread keeps only its running summary of every BOOL query.
     let next = AtomicUsize::new(0);
-    let mut indexed: Vec<(usize, ChunkIndex, Vec<(u32, u32)>)> = thread::scope(|s| {
+    let partial: Vec<(Vec<Summary>, Vec<(u32, u32)>)> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (plan, chunks, next) = (&plan, &chunks, &next);
+                let (plan, chunks, next, bools) = (&plan, &chunks, &next, &bools);
                 s.spawn(move || {
-                    let mut done = Vec::new();
+                    let mut results: Vec<Summary> = bools.iter().map(|_| Summary::default()).collect();
+                    let mut matches = Vec::new();
+                    let mut acc = Acc::default();
                     let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
                     let mut scratch = Scratch::default();
@@ -251,7 +264,6 @@ fn main() {
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
                         let mut n_docs = 0;
-                        let mut matches = Vec::new();
                         let mut base = None;
                         for_each_doc(chunk, |doc, text| {
                             let offset = doc - *base.get_or_insert(doc);
@@ -279,27 +291,28 @@ fn main() {
                             }
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
-                        let base = base.unwrap_or(0);
                         assert!(n_docs <= 1 << 16, "chunk too large for 16-bit offsets");
-                        done.push((base as usize, postings.index(base, n_docs), matches));
+                        let ci = postings.index(base.unwrap_or(0), n_docs);
+                        for (&(first, rest), result) in bools.iter().zip(&mut results) {
+                            if rest.is_empty() {
+                                emit(ci.set(first), ci.base, result);
+                                continue;
+                            }
+                            acc.start(ci.set(first));
+                            for &(op, t) in rest {
+                                acc.apply(op, ci.set(t));
+                            }
+                            acc.emit(ci.base, result);
+                        }
                     }
-                    done
+                    (results, matches)
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    // Restore document order: chunks are keyed by their first document id.
-    indexed.sort_unstable_by_key(|&(first, ..)| first);
-    let mut matches: Vec<(u32, u32)> = indexed
-        .iter_mut()
-        .flat_map(|(_, _, m)| std::mem::take(m))
-        .collect();
-    let index: Vec<ChunkIndex> = indexed.into_iter().map(|(_, ci, _)| ci).collect();
     // A phrase can match one document at several positions; count the document once.
+    let mut matches: Vec<(u32, u32)> = partial.iter().flat_map(|(_, m)| m).copied().collect();
     matches.sort_unstable();
     matches.dedup();
     let phrase_docs = |p: usize| {
@@ -308,45 +321,37 @@ fn main() {
         matches[lo..hi].iter().map(|&(_, d)| d)
     };
 
-    // Evaluate in blocks handed out dynamically; blocks are written back in order.
-    const BLOCK: usize = 256;
+    // Merge the threads' summaries and format, in blocks handed out dynamically;
+    // blocks are written back in order. `nth_bool[i]` numbers query i among the BOOLs.
+    let nth_bool: Vec<usize> = (plan.queries.iter())
+        .scan(0, |k, q| {
+            *k += matches!(q, Query::Bool(..)) as usize;
+            Some(*k - 1)
+        })
+        .collect();
+    const BLOCK: usize = 1024;
     let n_blocks = plan.queries.len().div_ceil(BLOCK);
     let next = AtomicUsize::new(0);
     let mut blocks: Vec<(usize, Vec<u8>)> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (plan, next, index, phrase_docs) = (&plan, &next, &index, &phrase_docs);
+                let (plan, next, partial, phrase_docs, nth_bool) =
+                    (&plan, &next, &partial, &phrase_docs, &nth_bool);
                 s.spawn(move || {
                     let mut done = Vec::new();
-                    let mut acc = Acc::default();
                     loop {
                         let k = next.fetch_add(1, Relaxed);
                         if k >= n_blocks {
                             break;
                         }
                         let mut buf = Vec::with_capacity(BLOCK * 40);
-                        let block = &plan.queries[k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len())];
-                        let mut results: Vec<Summary> = block.iter().map(|_| Summary::default()).collect();
-                        // Chunk by chunk, so one chunk's offsets and lists stay in cache for
-                        // the whole block. Chunks ascend, so each result still gets its
-                        // documents in order.
-                        for ci in index {
-                            for (q, result) in block.iter().zip(&mut results) {
-                                let Query::Bool(first, rest) = q else { continue };
-                                if rest.is_empty() {
-                                    emit(ci.set(*first), ci.base, result);
-                                    continue;
-                                }
-                                acc.start(ci.set(*first));
-                                for &(op, t) in rest {
-                                    acc.apply(op, ci.set(t));
-                                }
-                                acc.emit(ci.base, result);
-                            }
-                        }
-                        for (q, result) in block.iter().zip(&mut results) {
-                            if let Query::Phrase(p) = q {
-                                phrase_docs(*p).for_each(|d| result.add(d));
+                        for i in k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len()) {
+                            let mut result = Summary::default();
+                            match plan.queries[i] {
+                                Query::Phrase(p) => phrase_docs(p).for_each(|d| result.add(d)),
+                                Query::Bool(..) => partial
+                                    .iter()
+                                    .for_each(|(r, _)| result.merge(&r[nth_bool[i]])),
                             }
                             result.write(&mut buf);
                         }
@@ -950,9 +955,9 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
 /// `count sum id_1 .. id_10` of the matching documents, fed in ascending order.
 #[derive(Default)]
 struct Summary {
-    count: u64,
-    sum: u64,
+    count: u32,
     first: [u32; 10],
+    sum: u64,
 }
 
 impl Summary {
@@ -965,8 +970,23 @@ impl Summary {
         self.sum += doc as u64;
     }
 
+    /// Adds the summary of a disjoint set of documents: the ten smallest ids of the
+    /// union are the ten smallest of the two first-ten lists.
+    fn merge(&mut self, o: &Summary) {
+        let (a, b) = (&self.first[..self.count.min(10) as usize], &o.first[..o.count.min(10) as usize]);
+        let (mut first, mut i, mut j) = ([0; 10], 0, 0);
+        for f in first.iter_mut().take(a.len() + b.len()) {
+            if j == b.len() || (i < a.len() && a[i] < b[j]) {
+                (*f, i) = (a[i], i + 1);
+            } else {
+                (*f, j) = (b[j], j + 1);
+            }
+        }
+        (self.first, self.count, self.sum) = (first, self.count + o.count, self.sum + o.sum);
+    }
+
     fn write(&self, buf: &mut Vec<u8>) {
-        push_num(buf, self.count);
+        push_num(buf, self.count as u64);
         buf.push(b' ');
         push_num(buf, self.sum);
         for &d in &self.first[..(self.count as usize).min(10)] {
