@@ -449,3 +449,7 @@ fd68fcc	a	run-bf2cffb366a4	0.0290	21.5	522	38.11
 fd68fcc	b	run-5ee6705ae703	0.2475	67.3	976	21.23	EXPERIMENT: six chunks per thread: T 0.2475, M 67.3, K 21.23
 fd68fcc	c	run-bccc1e00058a	0.0402	11.1	529	30.12	
 fd68fcc	d	run-8a63888d7c70	0.2097	127.1	541	18.81	code unchanged from 6753993
+bea6fc6	a	run-78d4b874793f	0.0265	22.3	522	39.59	
+bea6fc6	b	run-5f2b80fd3e88	0.2550	60.4	976	21.38	EXPERIMENT: eight chunks per thread: T 0.2550, M 60.4, K 21.38
+bea6fc6	c	run-fe79b966aacd	0.0403	11.1	529	30.04	
+bea6fc6	d	run-fe4f72d93974	0.2503	128.0	541	17.19	code unchanged from 6753993 (0.2503: board noise)
