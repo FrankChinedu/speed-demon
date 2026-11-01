@@ -493,16 +493,32 @@ fn num(digits: &[u8]) -> i64 {
         .fold(0, |acc, &b| acc * 10 + (b - b'0') as i64)
 }
 
+/// "00" to "99": decimal digits are printed two per division.
+const PAIRS: [u8; 200] = {
+    let mut t = [0; 200];
+    let mut i = 0;
+    while i < 100 {
+        t[2 * i] = b'0' + (i / 10) as u8;
+        t[2 * i + 1] = b'0' + (i % 10) as u8;
+        i += 1;
+    }
+    t
+};
+
 fn push_num(out: &mut Vec<u8>, mut v: u64) {
     let mut buf = [0u8; 20];
     let mut i = buf.len();
-    loop {
+    while v >= 10 {
+        let pair = (v % 100) as usize * 2;
+        v /= 100;
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
+    }
+    // The last pair printed was 10 or more, so the only digit left is a lone one (or
+    // the zero of v == 0).
+    if v > 0 || i == buf.len() {
         i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
+        buf[i] = b'0' + v as u8;
     }
     out.extend_from_slice(&buf[i..]);
 }
