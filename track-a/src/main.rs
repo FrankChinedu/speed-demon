@@ -272,7 +272,7 @@ impl Scratch {
 
 /// Bytes of the file per chunk: a chunk owns the lines that start in it. Small enough
 /// that a thread's buffer stays in its core's L2 between the read and the parse.
-const CHUNK: usize = 1 << 17;
+const CHUNK: usize = 1 << 18;
 /// Read past a chunk's end, so its last line is whole: longer than any line, which is
 /// at most 27 + 7 + 125 + 3 + 10 bytes plus five separators.
 const SLACK: usize = 256;
