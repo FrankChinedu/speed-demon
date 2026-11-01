@@ -445,3 +445,7 @@ fec02e1	a	run-e61185c58386	0.0268	21.7	522	39.57
 fec02e1	b	run-215e302c1b8f	0.2446	73.2	976	21.00	EXPERIMENT: five chunks per thread: T 0.2446, M 73.2 (smaller per-thread buffers), K 21.00, best so far
 fec02e1	c	run-912cdb13536d	0.0404	11.1	529	29.97	
 fec02e1	d	run-8f285ada6653	0.1953	124.7	541	19.56	code unchanged from 6753993
+fd68fcc	a	run-bf2cffb366a4	0.0290	21.5	522	38.11	
+fd68fcc	b	run-5ee6705ae703	0.2475	67.3	976	21.23	EXPERIMENT: six chunks per thread: T 0.2475, M 67.3, K 21.23
+fd68fcc	c	run-bccc1e00058a	0.0402	11.1	529	30.12	
+fd68fcc	d	run-8a63888d7c70	0.2097	127.1	541	18.81	code unchanged from 6753993
