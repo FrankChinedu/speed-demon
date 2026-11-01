@@ -6,7 +6,11 @@ description: Speed Demon performance playbook for the Rust tracks in repo/track-
 # Speed Demon performance playbook
 
 K = (T_ref/T)^0.50 x min(M_ref/M, 50)^0.20 x min(S_ref/S, 1)^0.15 x (1/D)^0.15.
-Freeze is Nov 2 15:00 UTC. Board runs are the scarce resource: one per team per 15 minutes, and each push runs all four tracks.
+Freeze is Nov 2 15:00 UTC. Board runs are the scarce resource: about one per team per 5 minutes (a newer push replaces a queued one), and each push runs all four tracks.
+
+**Final scoring is not the board.** The freeze commit is built fresh and run 5 times on a holdout seed; T is the mean of the middle three, and all 5 runs must hash correctly. So a lucky board run is worth nothing, and correctness on unseen seeds is everything.
+
+Team setup, the two-way work split (A+C, B+D), per-track findings and the freeze checklist are in `dev/HANDOFF.md`. Read it first.
 
 ## 1. Start every session with the gap
 
@@ -14,19 +18,19 @@ Freeze is Nov 2 15:00 UTC. Board runs are the scarce resource: one per team per 
 python3 tools/board.py
 ```
 
-The `x... to <leader>` line under each track splits the gap to the leader per axis (T, M, S) and gives the leader's numbers as targets. Work on the axis with the biggest factor. As of Oct 31 05:00 UTC, T was the biggest factor everywhere (x1.25-1.5) and M mattered on B and D (x1.15-1.19). S was worth at most x1.06.
+The `x... to <leader>` line under each track splits the gap to the leader per axis (T, M, S) and gives the leader's numbers as targets. Work on the axis with the biggest factor. As of Nov 1, T is the biggest factor everywhere (the leaders are 2-4x faster), and M also matters on B (100 MB vs 47) and D (159 MB vs 65).
 
 Read the track's `PERF.md` before changing anything. It lists the failed experiments, so you don't repeat one.
 
 ## 2. The loop
 
-1. Make one change. Run `python3 tools/sd.py run <t> --scale tiny`, then `--scale full`, and `SD_SEED=2 ... --scale full`. Every case must PASS.
+1. Make one change. Run `python3 tools/verify.py <t>`: it runs the release binary on every local dataset (seeds 1-3) against `tools/expected.json`. Every case must PASS. (`python3 tools/sd.py run <t> --scale tiny` shows a diff on a mismatch.)
 2. `python3 tools/gate.py check` gates HEAD the same way the pre-push hook does: it builds the committed tree and checks several seeds.
 3. Stack changes: one experiment per track per commit, so a single board slot measures up to four ideas.
 4. After the board scores the push, `python3 tools/board.py` appends the row to `tools/runs.tsv`. Copy it into the track's PERF.md, failed experiments included.
 5. Timing probe: a commit whose subject starts with `TIMING PROBE (fails the hash on purpose)` exits early to time a prefix of the pipeline. The gate skips these. Revert it in the next commit.
 
-Local numbers (Apple M1, arm64) do not predict the box (i5-13500, x86-64, AVX2, 12 threads, 2.5 GHz). Use local runs for correctness and big wins only. Only board runs settle anything under about 15%.
+Local numbers (Apple M1, arm64) do not predict the box (i5-13500, x86-64, AVX2, 12 threads, 2.5 GHz, 1.25 MB L2 per core). Use local runs for correctness only. Board noise is about ±5%, so keep a change only if it clears that. The M1's 12 MB L2 hides cache misses the box pays for: B's posting scatter cost ~84 ms on the box and looked cheap locally.
 
 ## 3. Where the time goes, and what to try
 
@@ -50,7 +54,11 @@ The leaders' whole runs are faster than our parse-only probes (A: 0.019 s agains
 - Compact, cache-resident maps beat dense n-sized arrays (D step 2).
 - Per-thread pair lists plus a merge were faster in C but cost too much M. Check K, not T alone.
 - A per-side seen bitset in D was slower on the box.
-- The bitmask parser in A was no faster than word-at-a-time and 38 lines longer.
+- The bitmask parser in A was no faster than word-at-a-time and 38 lines longer. A simdcsv-style structural parser in C was no faster either: parsing is not where C loses.
+- `madvise(MADV_DONTNEED)` did not lower D's box peak, at 4 KB or 2 MB granularity: with THP on, the pages stay charged. (In A, with THP off, releasing blocks did work.)
+- B's 128 KB bloom filter saved nothing: most corpus tokens are query terms.
+- C's locked `fetch_or` on the shared bitset cost only ~2 ms; owner-written rows removed it but cost memory and lines.
+- Each track's PERF.md lists every failed experiment with its board run.
 
 **Output.** Format into one preallocated buffer per independent unit (A: per hour) and write in order with as few syscalls as possible. Don't drop large structures at the end: `std::process::exit(0)` after the final write skips the frees.
 

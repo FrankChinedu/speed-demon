@@ -42,7 +42,7 @@ SD_SEED=3 python3 tools/sd.py gen --tracks a c --scales tiny sample
 python3 tools/gate.py install            # pre-push hook: blocks pushes with a wrong hash
 ```
 
-Any current stable Rust works locally (the Docker build uses `rust:1-slim-trixie`, rustc 1.99.1). You need Docker running (generation happens in a no-network `python:3.13-slim` container). `full` data is a few hundred MB per track.
+`rust-toolchain.toml` at the repo root pins rustc 1.99.1 locally, the same as the Docker build (it sits outside the track folders on purpose, because the build is offline). You need Docker running (generation happens in a no-network `python:3.13-slim` container). `full` data is a few hundred MB per track.
 
 If you use Claude Code: the repo ships a skill, `.claude/skills/rust-perf/SKILL.md`, with our performance rules. Open the workspace folder and ask it to "use the rust-perf skill".
 

@@ -1,0 +1,6 @@
+# Matches rustc in the pinned rust:1-slim-trixie image. Lives outside the track
+# folders on purpose: inside a Docker build context it would make rustup try to
+# download a toolchain, and the build is offline.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
