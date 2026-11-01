@@ -342,6 +342,9 @@ fn parse(
             .map_or(c.len(), |i| i + 1);
     }
     while p < c.len() {
+        // The input is in 4 KB pages, and the hardware prefetcher stops at each page's
+        // end: keep the stream 1 KB ahead.
+        prefetch(&c[(p + 1024).min(c.len() - 1)]);
         // Every byte but a BOM's is ASCII (spec 2.2), so 0xEF at a record start is one.
         if c[p] == BOM[0] {
             p += 3;
