@@ -489,3 +489,7 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 9983071	b	run-f84dcbaab6f0	0.2715	39.7	1011	21.96	EXPERIMENT: eight chunks per thread with the touched-terms index: T 0.2715, M 39.7, K 21.96: each chunk costs ~1 ms of query evaluation; back to six
 9983071	c	run-4c43a8989d36	0.0404	11.0	529	30.04	
 9983071	d	run-0c34356a346c	0.1972	125.9	541	19.43	code unchanged from 6753993
+173ed27	a	run-b5532ae27198	0.0280	21.3	522	38.89	
+173ed27	b	run-c766d50d2fe6	0.2627	45.1	1025	22.17	six chunks per thread, queries skipped where a required term is absent: 0.2628, M 45.1 (box slow this run? A 0.0280); resampled
+173ed27	c	run-3a08187d0e19	0.0399	10.9	529	30.31	
+173ed27	d	run-ae50acd4f64b	0.2093	127.0	541	18.83	code unchanged from 6753993
