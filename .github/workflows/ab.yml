@@ -1,0 +1,53 @@
+# A/B timing of two commits of one track on an x86-64 runner (AVX2 paths run, as on
+# the scoring box). The board builds only the track-* folders of the speed-demon
+# branch, so this never affects a score or takes a board slot.
+#
+# Start it either way:
+#   gh workflow run ab.yml -f track=c -f base=<sha> -f head=<sha>
+#   or push a branch ab/<anything> whose commit has dev/ab.json:
+#   {"track": "c", "base": "<sha>", "head": "<sha>", "runs": 15}
+name: ab
+on:
+  push:
+    branches: ["ab/**"]
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "track (a or c)"
+        required: true
+        default: "a"
+      base:
+        description: "baseline commit"
+        required: true
+      head:
+        description: "candidate commit"
+        required: true
+      runs:
+        description: "timed runs of each, alternating"
+        required: false
+        default: "15"
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: git clone --depth 1 https://github.com/hackathon-raptors/speed-demon-2026 /tmp/harness
+      - env:
+          TRACK: ${{ inputs.track }}
+          BASE: ${{ inputs.base }}
+          HEAD_REF: ${{ inputs.head }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          if [ -z "$TRACK" ]; then
+            TRACK=$(python3 -c 'import json;print(json.load(open("dev/ab.json"))["track"])')
+            BASE=$(python3 -c 'import json;print(json.load(open("dev/ab.json"))["base"])')
+            HEAD_REF=$(python3 -c 'import json;print(json.load(open("dev/ab.json"))["head"])')
+            RUNS=$(python3 -c 'import json;print(json.load(open("dev/ab.json")).get("runs", 15))')
+          fi
+          python3 dev/tools/ab.py "$TRACK" "$BASE" "$HEAD_REF" "$RUNS"
