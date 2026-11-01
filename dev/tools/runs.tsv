@@ -389,3 +389,7 @@ ffbc9b1	a	run-e3b35a53c6f0	0.0281	23.3	526	38.13
 ffbc9b1	b	run-467e344c1143	0.2838	81.0	920	19.28	chunk index allocated per chunk again (side-by-side last document and count kept): M 86.1 -> 81.0, T 0.2838; x86 A/B vs reuse 1.001x (no difference)
 ffbc9b1	c	run-1c23a8c57c8f	0.0414	11.0	515	29.81	
 ffbc9b1	d	run-b057b94f104b	0.2129	129.1	541	18.61	in-edges read back from the out rows, restored (x86 A/B 1.073x over the second parse): 0.2129
+09b5340	a	run-ae6d3308ae7b	0.0292	23.5	526	37.28	
+09b5340	c	run-ed9aa84a8649	0.0416	10.5	515	30.00	
+09b5340	d	run-483d2267abd5	0.2254	127.7	541	18.13	code unchanged from 6753993
+09b5340	b	run-093e92657a78	0.1480	41.8	-	-	TIMING PROBE (fails the hash on purpose): tokenizing only with the boundary walk: 148 ms (153.8 before); the full run is ~284, so postings, phrases, scatter and queries cost ~136 ms
