@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 68b9d50)
+HEAD is now at 68b9d50 Track B: each BOOL term's last document and chunk count side by side (one cache line per posting instead of two random 214 KB arrays), and each thread's chunk index and scatter scratch reused from chunk to chunk instead of fresh allocations per chunk
+$ cargo build --release -q
+### A/B track b: base 8ce6ac2 vs head 68b9d50
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1103.45 | 1096.80 | OK |
+| head | 1082.15 | 1075.34 | OK |
+
+speedup base/head 1.020, 95% CI [1.017, 1.034]: **head FASTER**
