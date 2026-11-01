@@ -465,7 +465,7 @@ bea6fc6	d	run-fe4f72d93974	0.2503	128.0	541	17.19	code unchanged from 6753993 (0
 440c037	b	run-d4460d2736f9	0.2667	41.0	1007	22.16	one shared summary per BOOL query (atomic count/sum, ten smallest under a per-query lock) instead of one per thread: M 57.7 -> 41.0, T 0.2667, K 22.16, best so far
 440c037	c	run-f40c0a514a5b	0.0444	10.5	529	28.94	
 440c037	d	run-8b171aabe0b9	0.2126	127.3	541	18.67	code unchanged from 6753993
-13d1b99	a	run-33f515b096c7	0.0283	21.5	522	38.58	
+13d1b99	a	run-33f515b096c7	0.0283	21.5	522	38.58	FAILED TUNING (code of 0c26e3f): 64 KB read chunks: 0.0283 and 0.0285 against ~0.0265, M -0.4 MB; reverted
 13d1b99	b	run-246ec4cb0362	0.2435	47.4	1007	22.85	EXPERIMENT (pushed as d96fdfe): six chunks per thread with shared summaries: T 0.2435, M 47.4, K 22.85, best so far
-13d1b99	c	run-bdce264e760f	0.0403	10.5	529	30.35	
+13d1b99	c	run-bdce264e760f	0.0403	10.5	529	30.35	code unchanged from 48a2c66
 13d1b99	d	run-4ef5d786c54e	0.2249	122.1	541	18.31	code unchanged from 6753993

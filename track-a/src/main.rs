@@ -1,7 +1,7 @@
 //! Track A: Ingest. For every (UTC hour, endpoint): count, nearest-rank p50/p95/p99,
 //! 5xx count and floor parts-per-million.
 //!
-//! 1. Hand out 64 KB chunks of the log to the threads, each read with `pread` into
+//! 1. Hand out 128 KB chunks of the log to the threads, each read with `pread` into
 //!    the thread's one buffer. A chunk owns the lines that start in it.
 //! 2. Each thread parses its lines into 4-byte records `endpoint << 21 | latency`,
 //!    written into blocks it claims from its hour's mapping. Endpoints get global ids from one
@@ -268,7 +268,7 @@ impl Scratch {
 
 /// Bytes of the file per chunk: a chunk owns the lines that start in it. Small enough
 /// that a thread's buffer stays in its core's L2 between the read and the parse.
-const CHUNK: usize = 1 << 16;
+const CHUNK: usize = 1 << 17;
 /// Read past a chunk's end, so its last line is whole: longer than any line, which is
 /// at most 27 + 7 + 125 + 3 + 10 bytes plus five separators.
 const SLACK: usize = 256;
