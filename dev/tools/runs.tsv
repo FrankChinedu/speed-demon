@@ -282,3 +282,7 @@ e542027	d	run-961d2e4f493a	0.2103	159.1	507	18.13
 4c412e0	b	run-98bf45dfe6d4	0.2976	99.7	866	18.22	
 4c412e0	c	run-d8f7e20fd693	0.0531	14.0	530	24.98	text field reader forced inline (x86 A/B 1.039x); board noise: slower than the run before
 4c412e0	d	run-ba6e3da68a9e	0.1997	159.8	507	18.59	
+0abea93	a	run-fc6f5b4c2f6c	0.0404	23.4	442	32.56	endpoint hash without the murmur3 finalizer (x86 A/B 1.029x)
+0abea93	b	run-fc3d04d33f27	0.3114	99.9	866	17.81	
+0abea93	c	run-47cadd8d72a8	0.0532	14.0	551	24.80	region join batched with the name lookups (x86 A/B 1.024x); box: no better than 4c412e0
+0abea93	d	run-fc0dac0fc1e4	0.2122	160.0	507	18.03	
