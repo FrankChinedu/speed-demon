@@ -402,6 +402,39 @@ fn intern(
     }
 }
 
+/// The hash of the name in the first `len` (< 32) bytes of `block`: each of its
+/// zero-padded words xored with a key, the product of its halves plus its neighbour
+/// word (the XXH3 accumulate step), then two folded multiplies.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+fn short_hash(block: &[u8; 32], len: usize) -> u64 {
+    use std::arch::x86_64::*;
+    // SAFETY: AVX2 is enabled at compile time, the unaligned load reads exactly the 32
+    // bytes of `block`, and the transmute reads a 32-byte vector as four u64s, a type
+    // of the same size for which every bit pattern is valid.
+    unsafe {
+        let v = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
+        let index = _mm256_setr_epi8(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        );
+        let d = _mm256_and_si256(v, _mm256_cmpgt_epi8(_mm256_set1_epi8(len as i8), index));
+        let x = _mm256_xor_si256(
+            d,
+            _mm256_setr_epi64x(
+                0x1cad_21f7_2c81_017cu64 as i64,
+                0xdb97_9083_e96d_d4deu64 as i64,
+                0x1f67_b3b7_a4a4_4072u64 as i64,
+                0x78e5_c0cc_4ee6_79cbu64 as i64,
+            ),
+        );
+        let product = _mm256_mul_epu32(x, _mm256_srli_epi64::<32>(x));
+        let acc = _mm256_add_epi64(product, _mm256_shuffle_epi32::<0b01_00_11_10>(d));
+        let [a, b, c, d]: [u64; 4] = std::mem::transmute(acc);
+        mix(mix(len as u64 ^ a, b), c ^ d.rotate_left(32))
+    }
+}
+
 /// Starts loading the cache line holding `r`. A hint only: it never faults.
 #[inline]
 fn prefetch<T>(r: &T) {
@@ -446,7 +479,24 @@ impl Names {
     /// The hash of the name `c[start..start + len]`: the folded multiply over its
     /// words. The fold spreads every bit both ways, so no finaliser is needed: on 4.9
     /// million near-duplicate names (one or two bytes changed) it had no collision.
+    ///
+    /// With AVX2, names under 32 bytes (nearly all) are instead hashed by one XXH3
+    /// accumulate step over their zero-padded four words, with no loop whose length
+    /// the branch predictor would have to guess. Which form hashes a name depends
+    /// only on its length, so a name always gets the same hash.
     fn hash(c: &[u8], start: usize, len: usize) -> u64 {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        if len < 32 {
+            let mut pad = [0u8; 32]; // at the end of the input
+            let block: &[u8; 32] = match c.get(start..start + 32) {
+                Some(w) => w.try_into().unwrap(),
+                None => {
+                    pad[..len].copy_from_slice(&c[start..start + len]);
+                    &pad
+                }
+            };
+            return short_hash(block, len);
+        }
         (0..len.div_ceil(8)).fold(len as u64, |h, k| mix(h, name_word(c, start, len, k)))
     }
 
