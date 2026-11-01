@@ -845,15 +845,21 @@ fn hash(k: &Key) -> u64 {
 fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
     // Tokens are separated, so there are at most len / 2 + 1 of them: the buffer is
     // sized once and written by index, with no capacity check per token.
-    if scratch.hashes.len() < text.len() / 2 + 1 {
-        scratch.hashes.resize(text.len() / 2 + 1, 0);
+    let Scratch { hashes, cache } = scratch;
+    if cache.is_empty() {
+        cache.resize(1 << CACHE_BITS, (0, NONE));
     }
-    let (hashes, mut n) = (&mut scratch.hashes[..], 0);
+    if hashes.len() < text.len() / 2 + 1 {
+        hashes.resize(text.len() / 2 + 1, 0);
+    }
+    let (hashes, mut n) = (&mut hashes[..], 0);
     let mut token = |start: usize, end: usize| {
         let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
             h = hash(&key_at(text, start, end - start));
-            prefetch(&terms.slots[h as usize & terms.mask]);
+            if cache[(h >> (64 - CACHE_BITS)) as usize].0 != h {
+                prefetch(&terms.slots[h as usize & terms.mask]);
+            }
         }
         hashes[n] = h;
         n += 1;
@@ -888,16 +894,30 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
         token(start, text.len());
     }
     slots.clear();
-    slots.extend(scratch.hashes[..n].iter().map(|&h| match h {
+    slots.extend(hashes[..n].iter().map(|&h| match h {
         0 => NONE,
-        h => terms.find(h),
+        h => {
+            let c = &mut cache[(h >> (64 - CACHE_BITS)) as usize];
+            if c.0 != h {
+                *c = (h, terms.find(h));
+            }
+            c.1
+        }
     }));
 }
+
+/// Entries in each thread's cache of recent lookups: 2,048 of (hash, slot), 32 KB, so
+/// it stays in L1. Corpus tokens are Zipf-distributed, so a few thousand terms are
+/// most of the lookups, while in the 1 MB table each sits in a cache line of colder
+/// neighbours.
+const CACHE_BITS: u32 = 11;
 
 /// Per-thread buffers for `tokenize`.
 #[derive(Default)]
 struct Scratch {
     hashes: Vec<u64>,
+    /// Recent lookups by the hash's top bits: (hash, slot or NONE).
+    cache: Vec<(u64, u32)>,
 }
 
 /// Starts loading the cache line holding `r`. A hint only: it never faults.
