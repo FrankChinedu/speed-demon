@@ -397,3 +397,7 @@ f6cc5dc	a	run-2c4522dc84c2	0.0275	23.3	526	38.54	code of 529b16e (second sample)
 f6cc5dc	b	run-cf8c5529a0a8	0.2735	83.6	959	19.39	compact 1 MB term table (x86 A/B 1.017x) and bitmaps above 1/64 of a chunk (1.023x; 1/256 was 0.958x): 0.2735, M 83.6
 f6cc5dc	c	run-ade2730ae19d	0.0409	11.0	515	29.99	code of 529b16e (second sample)
 f6cc5dc	d	run-913b74adc131	0.1959	127.0	541	19.46	code unchanged from 6753993 (in-edges from the out rows): 0.1959, best so far
+ae1dbdb	a	run-05545a49ce9a	0.0276	22.9	526	38.54	
+ae1dbdb	b	run-a92f27e7df26	0.2536	82.6	978	20.13	results summarised in bulk once the ten smallest ids are known (popcounts for bitmap words; x86 A/B 1.074x): 0.2536, best so far
+ae1dbdb	c	run-140f75637ff1	0.0415	12.1	515	29.21	
+ae1dbdb	d	run-28d381916cb6	0.1965	124.8	541	19.50	code unchanged from 6753993: 0.1965 (second sample at ~0.196)
