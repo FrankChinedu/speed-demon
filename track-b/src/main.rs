@@ -276,7 +276,7 @@ fn main() {
                     // most 65,536 BOOL terms), split by term range; and each term's count.
                     let mut postings = Postings {
                         groups: vec![Vec::new(); GROUPS],
-                        seen: vec![(NONE, 0); plan.n_bool],
+                        seen: vec![(u16::MAX, 0); plan.n_bool + 1],
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
@@ -291,14 +291,14 @@ fn main() {
                             n_docs += 1;
                             ids.clear();
                             keys.clear();
-                            tokenize(text, &plan.table, &mut scratch, &mut ids);
+                            tokenize(text, &plan.table, &postings.seen, &mut scratch, &mut ids);
                             // Each token's BOOL posting (once per document) and whether a
                             // phrase is keyed on it, from its slot.
                             for (i, &t) in ids.iter().enumerate().filter(|(_, t)| **t != NONE) {
                                 let e = plan.table.slots[t as usize];
                                 let b = (e & T_NO_BOOL) as u32;
                                 if b != T_NO_BOOL as u32 {
-                                    postings.add(doc, offset, b);
+                                    postings.add(offset, b);
                                 }
                                 if e & T_KEYED != 0 {
                                     let k = &plan.key_first[t as usize..];
@@ -307,7 +307,7 @@ fn main() {
                             }
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
-                        assert!(n_docs <= 1 << 16, "chunk too large for 16-bit offsets");
+                        assert!(n_docs < 1 << 16, "chunk too large for 16-bit offsets");
                         let ci = postings.index(base.unwrap_or(0), n_docs);
                         for (&(first, rest), result) in bools.iter().zip(&mut results) {
                             if rest.is_empty() {
@@ -398,19 +398,21 @@ const GROUPS: usize = 64;
 /// stay in cache, instead of all ~50,000 lists at once.
 struct Postings {
     groups: Vec<Vec<u32>>,
-    /// Per BOOL term: the last document that gave it a posting, and its count in the
-    /// chunk, side by side so a token touches one cache line.
-    seen: Vec<(u32, u32)>,
+    /// Per BOOL term: the offset of the last document of the chunk that gave it a
+    /// posting (u16::MAX before the first), and its count in the chunk, side by side
+    /// in 4 bytes so a token touches one small cache line. The tokenizer prefetches a
+    /// token's entry when it finds its slot. The spare last entry is never written.
+    seen: Vec<(u16, u16)>,
     shift: u32,
 }
 
 impl Postings {
-    /// Records that document `doc` (at `offset` in the chunk) contains BOOL term `b`.
+    /// Records that the document at `offset` in the chunk contains BOOL term `b`.
     #[inline]
-    fn add(&mut self, doc: u32, offset: u32, b: u32) {
+    fn add(&mut self, offset: u32, b: u32) {
         let seen = &mut self.seen[b as usize];
-        if seen.0 != doc {
-            *seen = (doc, seen.1 + 1);
+        if seen.0 != offset as u16 {
+            *seen = (offset as u16, seen.1 + 1);
             self.groups[b as usize >> self.shift].push(offset << 16 | b);
         }
     }
@@ -418,7 +420,7 @@ impl Postings {
     /// Turns the chunk's postings into its index and empties the buffers. Documents
     /// were visited in order, so every list comes out ascending.
     fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
-        let n_bool = self.seen.len();
+        let n_bool = self.seen.len() - 1;
         let words = n_docs.div_ceil(64);
         // Dense terms (in more than 1/64 of the documents) become bitmaps and get an
         // empty list range.
@@ -427,16 +429,16 @@ impl Postings {
         let mut is_dense = vec![0u64; n_bool.div_ceil(64)];
         let mut slot = vec![u32::MAX; n_bool];
         let mut total = 0;
-        for (b, (_, c)) in self.seen.iter_mut().enumerate() {
+        for (b, (last, c)) in self.seen[..n_bool].iter_mut().enumerate() {
             offsets[b] = total;
             if *c as usize * 64 > n_docs {
                 slot[b] = (dense.len() * words) as u32;
                 dense.push((b as u32, slot[b]));
                 is_dense[b / 64] |= 1 << (b % 64);
             } else {
-                total += *c;
+                total += *c as u32;
             }
-            *c = 0;
+            (*last, *c) = (u16::MAX, 0);
         }
         offsets[n_bool] = total;
         let mut cursor = offsets.clone();
@@ -841,7 +843,13 @@ fn hash(k: &Key) -> u64 {
 /// The term table does not fit in L2, so the lookups for a whole document go in
 /// stages: hash and slot prefetch for every token, then the probes. The misses of
 /// one stage overlap instead of each token waiting for its own.
-fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
+fn tokenize(
+    text: &[u8],
+    terms: &Table,
+    seen: &[(u16, u16)],
+    scratch: &mut Scratch,
+    slots: &mut Vec<u32>,
+) {
     token_mask(text, &mut scratch.mask);
     scratch.hashes.clear();
     let mut token = |start: usize, end: usize| {
@@ -873,9 +881,17 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
         token(start, text.len());
     }
     slots.clear();
+    // Each found term's postings entry is prefetched for the loop that follows.
     slots.extend(scratch.hashes.iter().map(|&h| match h {
         0 => NONE,
-        h => terms.find(h),
+        h => {
+            let i = terms.find(h);
+            if i != NONE {
+                let b = (terms.slots[i as usize] & T_NO_BOOL) as usize;
+                prefetch(&seen[b.min(seen.len() - 1)]);
+            }
+            i
+        }
     }));
 }
 
