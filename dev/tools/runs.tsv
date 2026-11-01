@@ -393,3 +393,7 @@ ffbc9b1	d	run-b057b94f104b	0.2129	129.1	541	18.61	in-edges read back from the ou
 09b5340	c	run-ed9aa84a8649	0.0416	10.5	515	30.00	
 09b5340	d	run-483d2267abd5	0.2254	127.7	541	18.13	code unchanged from 6753993
 09b5340	b	run-093e92657a78	0.1480	41.8	-	-	TIMING PROBE (fails the hash on purpose): tokenizing only with the boundary walk: 148 ms (153.8 before); the full run is ~284, so postings, phrases, scatter and queries cost ~136 ms
+f6cc5dc	a	run-2c4522dc84c2	0.0275	23.3	526	38.54	
+f6cc5dc	b	run-cf8c5529a0a8	0.2735	83.6	959	19.39	compact 1 MB term table (x86 A/B 1.017x) and bitmaps above 1/64 of a chunk (1.023x; 1/256 was 0.958x): 0.2735, M 83.6
+f6cc5dc	c	run-ade2730ae19d	0.0409	11.0	515	29.99	
+f6cc5dc	d	run-913b74adc131	0.1959	127.0	541	19.46	code unchanged from 6753993 (in-edges from the out rows): 0.1959, best so far
