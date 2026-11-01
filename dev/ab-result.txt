@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 40f4c2b)
+HEAD is now at 40f4c2b Track B: first occurrences in a document found by a 6.7 KB bitset of BOOL terms (in L1, cleared through the document's terms) instead of a 214 KB per-term last-document array missed on every token; chunk counts come from a counting pass over the posting groups (one term range each, so the counters stay in cache)
+$ cargo build --release -q
+### A/B track b: base eec5d8b vs head 40f4c2b
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 860.91 | 855.88 | OK |
+| head | 890.04 | 882.34 | OK |
+
+speedup base/head 0.967, 95% CI [0.962, 0.975]: **head SLOWER**
