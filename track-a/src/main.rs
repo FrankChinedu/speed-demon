@@ -120,7 +120,7 @@ fn main() {
                     while w.next < HOURS
                         && let Some(lines) = w.done[w.next].take()
                     {
-                        std::hint::black_box(&lines); // TIMING PROBE: formatted, not written
+                        w.file.write_all(&lines).expect("write summary.txt");
                         w.next += 1;
                     }
                 }

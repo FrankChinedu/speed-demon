@@ -90,8 +90,11 @@ fn main() {
     let names = Names::new();
     let bits = zeroed_atomics(groups * MAX_IDS / 64);
     let overflow = Mutex::new(Vec::new());
+    let locks: Vec<Mutex<()>> = (0..SHARDS).map(|_| Mutex::new(())).collect();
     let seen = Seen {
         bits: &bits,
+        locks: &locks,
+        per_shard: groups.div_ceil(SHARDS),
         overflow: &overflow,
     };
     // Many chunks handed out on demand, so a slow core never holds up the rest.
@@ -103,9 +106,13 @@ fn main() {
                 let (region, names, seen, chunks, next) = (&region, &names, &seen, &chunks, &next);
                 s.spawn(move || {
                     let mut aggs = vec![Agg::EMPTY; groups];
+                    let mut queues = vec![Vec::with_capacity(QUEUE); SHARDS];
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, region, &mut aggs, names, seen);
+                        parse(chunk, first, region, &mut aggs, names, seen, &mut queues);
+                    }
+                    for (s, queue) in queues.iter_mut().enumerate() {
+                        seen.apply(s, queue);
                     }
                     aggs
                 })
@@ -232,36 +239,62 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
 /// Where each (country, name id) pair is recorded: one bit per pair, shared by all
 /// threads, so its memory does not grow with the number of threads.
+///
+/// The countries are split into shards of consecutive rows, each behind a lock. A
+/// thread queues its pairs per shard and applies a full queue under one lock, with
+/// plain loads and stores: no locked instruction per record, and no bitset line
+/// moving between cores per record. A queue touches only its shard's rows, which
+/// stay in cache while it is applied.
 struct Seen<'a> {
     bits: &'a [AtomicU64],
+    locks: &'a [Mutex<()>],
+    per_shard: usize, // countries per shard
     overflow: &'a Mutex<Vec<(usize, u32)>>,
 }
 
-impl Seen<'_> {
-    #[inline]
-    fn prefetch(&self, g: usize, id: u32) {
-        if (id as usize) < MAX_IDS {
-            prefetch(&self.bits[(g * MAX_IDS + id as usize) / 64]);
-        }
-    }
+/// Bitset shards, and pairs queued per shard before a thread applies them.
+const SHARDS: usize = 16;
+const QUEUE: usize = 2048;
 
+impl Seen<'_> {
+    /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,
+    /// and there are at most 26^3 + 1 < 2^15 countries.
     #[inline]
-    fn insert(&self, g: usize, id: u32) {
+    fn insert(&self, queues: &mut [Vec<u32>], g: usize, id: u32) {
         if (id as usize) < MAX_IDS {
-            let bit = g * MAX_IDS + id as usize;
-            // Skip the atomic write, and the cache-line transfer it forces, when the
-            // pair is already recorded.
-            let word = &self.bits[bit / 64];
-            if word.load(Relaxed) & 1 << (bit % 64) == 0 {
-                word.fetch_or(1 << (bit % 64), Relaxed);
+            let s = g / self.per_shard;
+            queues[s].push((g as u32) << MAX_IDS.trailing_zeros() | id);
+            if queues[s].len() == QUEUE {
+                self.apply(s, &mut queues[s]);
             }
         } else {
             self.overflow.lock().unwrap().push((g, id));
         }
     }
+
+    /// Sets the bits of shard `s`'s queued pairs. Only the holder of the shard's lock
+    /// writes its words, so a plain load and store is an exact OR.
+    fn apply(&self, s: usize, queue: &mut Vec<u32>) {
+        let _held = self.locks[s].lock().unwrap();
+        for &e in queue.iter() {
+            let bit =
+                (e >> MAX_IDS.trailing_zeros()) as usize * MAX_IDS + (e as usize & (MAX_IDS - 1));
+            let word = &self.bits[bit / 64];
+            word.store(word.load(Relaxed) | 1 << (bit % 64), Relaxed);
+        }
+        queue.clear();
+    }
 }
 
-fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
+fn parse(
+    c: &[u8],
+    first: bool,
+    region: &[u16],
+    aggs: &mut [Agg],
+    names: &Names,
+    seen: &Seen,
+    queues: &mut [Vec<u32>],
+) {
     let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
@@ -305,37 +338,34 @@ fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names,
         batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen);
+            intern(c, &batch, names, seen, queues);
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen);
+    intern(c, &batch[..n], names, seen, queues);
 }
 
 /// Records per interning batch.
 const BATCH: usize = 32;
 
-/// Interns a batch of (country, name start, name end) and marks each pair seen. Every
-/// lookup is a likely cache miss into the shared tables, so they go in passes: hash
-/// and prefetch every slot, then resolve the ids and prefetch their bitset words,
-/// then set the bits. The misses of one pass overlap instead of each record waiting
-/// for its own.
-fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
+/// Interns a batch of (country, name start, name end) and queues each pair to be
+/// marked seen. Every lookup is a likely cache miss into the shared name table, so
+/// they go in two passes: hash and prefetch every slot, then resolve the ids. The
+/// misses of one pass overlap instead of each record waiting for its own.
+fn intern(
+    c: &[u8],
+    batch: &[(usize, usize, usize)],
+    names: &Names,
+    seen: &Seen,
+    queues: &mut [Vec<u32>],
+) {
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
         *h = Names::hash(c, start, end - start);
         names.prefetch_slot(*h);
     }
-    let mut ids = [0u32; BATCH];
-    for ((id, &h), &(g, ..)) in ids.iter_mut().zip(&hashes).zip(batch) {
-        *id = names.id(h);
-        std::hint::black_box((g, *id));
-    }
-    if !batch.is_empty() {
-        return; // TIMING PROBE: names looked up, no bitset prefetch or writes
-    }
-    for (&id, &(g, ..)) in ids.iter().zip(batch) {
-        seen.insert(g, id);
+    for (&h, &(g, ..)) in hashes.iter().zip(batch) {
+        seen.insert(queues, g, names.id(h));
     }
 }
 
