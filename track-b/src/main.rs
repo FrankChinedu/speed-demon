@@ -18,7 +18,7 @@ mod mmap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
 /// A token that no query uses, or a term that is not in any BOOL query.
@@ -239,11 +239,13 @@ fn main() {
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     mmap::one_arena();
-    let plan = plan(mmap::map(&data.join("queries.txt")));
-    let docs = mmap::map(&data.join("docs.txt"));
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
+    let plan = plan(mmap::map(&data.join("queries.txt")), threads);
+    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0); // TIMING PROBE
+    let docs = mmap::map(&data.join("docs.txt"));
     // Four chunks per thread, so the last round is not left half empty; at most
     // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
     let chunks = split_lines(docs, (threads * 4).max(docs.len() >> 23));
@@ -468,50 +470,128 @@ impl Postings {
     }
 }
 
-/// Parses queries.txt and assigns term ids.
-fn plan(text: &'static [u8]) -> Plan {
-    // Query words go straight into the token table, keyed exactly as the tokenizer
-    // will key corpus tokens (terms are already lowercase).
-    let mut terms = Terms::default();
-    let mut id = |w: &[u8]| {
-        assert!(w.len() <= MAX_TERM, "query term longer than 32 bytes");
-        terms.insert(key_at(
-            text,
-            w.as_ptr() as usize - text.as_ptr() as usize,
-            w.len(),
-        ))
-    };
-    let mut raw_bool: Vec<(u32, Vec<(Op, u32)>)> = Vec::new();
-    let mut queries = Vec::new();
-    let mut phrases: Vec<Vec<u32>> = Vec::new();
-    for line in text.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+/// One piece of queries.txt as parsed, with no allocation per query (the threads
+/// share one malloc arena): every term's hash in order, each query's kind and term
+/// count, and every BOOL operator in order.
+#[derive(Default)]
+struct Parsed {
+    hashes: Vec<u64>,
+    queries: Vec<(bool, usize)>,
+    ops: Vec<Op>,
+}
+
+impl Parsed {
+    /// Parses one query line. Terms are hashed exactly as the tokenizer will hash
+    /// corpus tokens (query terms are already lowercase).
+    fn line(&mut self, text: &[u8], line: &[u8]) {
+        let (before, phrase) = (self.hashes.len(), !line.starts_with(b"BOOL "));
+        let hashes = &mut self.hashes;
+        let mut term = |w: &[u8]| {
+            assert!(w.len() <= MAX_TERM, "query term longer than 32 bytes");
+            let at = w.as_ptr() as usize - text.as_ptr() as usize;
+            hashes.push(hash(&key_at(text, at, w.len())));
+        };
         if let Some(rest) = line.strip_prefix(b"BOOL ") {
-            let mut words = rest.split(|&b| b == b' ');
-            let first = id(words.next().unwrap());
-            let mut ops = Vec::new();
-            while let (Some(op), Some(w)) = (words.next(), words.next()) {
-                let op = match op {
+            for (i, w) in rest.split(|&b| b == b' ').enumerate() {
+                if i % 2 == 0 {
+                    term(w);
+                    continue;
+                }
+                self.ops.push(match w {
                     b"AND" => Op::And,
                     b"OR" => Op::Or,
                     b"NOT" => Op::Not,
                     _ => panic!("bad operator in {}", String::from_utf8_lossy(line)),
-                };
-                ops.push((op, id(w)));
+                });
             }
-            raw_bool.push((first, ops));
-            queries.push(Query::Bool(0, Vec::new()));
         } else {
-            let inner = line
-                .strip_prefix(b"PHRASE \"")
+            let inner = (line.strip_prefix(b"PHRASE \""))
                 .and_then(|r| r.strip_suffix(b"\""))
                 .expect("bad query");
-            phrases.push(inner.split(|&b| b == b' ').map(&mut id).collect());
-            queries.push(Query::Phrase(phrases.len() - 1));
+            inner.split(|&b| b == b' ').for_each(term);
+        }
+        self.queries.push((phrase, self.hashes.len() - before));
+    }
+}
+
+/// Parses queries.txt and assigns term ids. Serially this was ~9% of the run on the
+/// box, so the parsing and the set of distinct terms are shared out.
+fn plan(text: &'static [u8], threads: usize) -> Plan {
+    // Lines are parsed in parallel, one piece of the file per thread.
+    let parsed: Vec<Parsed> = thread::scope(|s| {
+        let handles: Vec<_> = (split_lines(text, threads).into_iter())
+            .map(|piece| {
+                s.spawn(move || {
+                    let mut p = Parsed::default();
+                    (piece.split(|&b| b == b'\n').filter(|l| !l.is_empty()))
+                        .for_each(|line| p.line(text, line));
+                    p
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // The distinct terms, in parallel: every hash goes into a lock-free set that
+    // stays at most half full. A term's id is then its rank among the filled slots.
+    let words: usize = parsed.iter().map(|p| p.hashes.len()).sum();
+    let set: Vec<AtomicU64> = (0..(2 * words).next_power_of_two()).map(|_| AtomicU64::new(0)).collect();
+    let slot_in_set = |h: u64| {
+        let mut i = h as usize & (set.len() - 1);
+        loop {
+            match set[i].load(Relaxed) {
+                x if x == h => return i,
+                0 if set[i].compare_exchange(0, h, Relaxed, Relaxed).is_ok() => return i,
+                0 => continue, // another thread filled it first: look again
+                _ => i = (i + 1) & (set.len() - 1),
+            }
+        }
+    };
+    thread::scope(|s| {
+        for p in &parsed {
+            s.spawn(|| p.hashes.iter().for_each(|&h| _ = slot_in_set(h)));
+        }
+    });
+    let n_terms = set.iter().filter(|h| h.load(Relaxed) != 0).count();
+    let mut terms = Terms::with_capacity((n_terms * 5 / 3 + 1).next_power_of_two().max(1 << 16));
+    let mut id = vec![NONE; set.len()];
+    for (i, h) in set.iter().enumerate() {
+        let h = h.load(Relaxed);
+        if h != 0 {
+            id[i] = terms.count;
+            terms.place(Slot { hash: h, id: terms.count });
+            terms.count += 1;
+        }
+    }
+    let ids: Vec<Vec<u32>> = thread::scope(|s| {
+        let handles: Vec<_> = (parsed.iter())
+            .map(|p| {
+                let (id, slot_in_set) = (&id, &slot_in_set);
+                s.spawn(move || p.hashes.iter().map(|&h| id[slot_in_set(h)]).collect::<Vec<_>>())
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut raw_bool: Vec<(u32, Vec<(Op, u32)>)> = Vec::new();
+    let mut queries = Vec::new();
+    let mut phrases: Vec<Vec<u32>> = Vec::new();
+    for (p, ids) in parsed.iter().zip(&ids) {
+        let (mut at, mut ops) = (0, p.ops.iter().copied());
+        for &(phrase, n) in &p.queries {
+            let t = &ids[at..at + n];
+            at += n;
+            if phrase {
+                phrases.push(t.to_vec());
+                queries.push(Query::Phrase(phrases.len() - 1));
+            } else {
+                raw_bool.push((t[0], t[1..].iter().map(|&t| (ops.next().unwrap(), t)).collect()));
+                queries.push(Query::Bool(0, Vec::new()));
+            }
         }
     }
 
     // BOOL terms get dense indices so each chunk's offset table only covers them.
-    let n_terms = terms.count as usize;
     let mut bool_index = vec![NONE; n_terms];
     let mut n_bool = 0;
     let mut dense = |t: u32| {
@@ -749,20 +829,14 @@ impl Table {
     }
 }
 
-/// Open-addressing table from query terms to their ids while the plan is built.
-/// Terms are identified by a strong 64-bit hash of their bytes, so a lookup needs no
-/// key comparison. Most corpus tokens are query terms, so there is no filter in front
+/// Open-addressing table of the query terms while the plan is built, at most 60%
+/// full. Terms are identified by a strong 64-bit hash of their bytes, so no key is
+/// compared. Most corpus tokens are query terms, so there is no filter in front
 /// of the corpus pass's copy: on the box a 128 KB bit filter saved nothing.
 struct Terms {
     mask: usize,
     slots: Vec<Slot>,
     count: u32,
-}
-
-impl Default for Terms {
-    fn default() -> Self {
-        Terms::with_capacity(1 << 16)
-    }
 }
 
 impl Terms {
@@ -774,49 +848,12 @@ impl Terms {
         }
     }
 
-    /// The id of `key`, adding it if it is new. Grows at 60% full.
-    fn insert(&mut self, key: Key) -> u32 {
-        let h = hash(&key);
-        let i = self.find(h);
-        if i != NONE {
-            return self.slots[i as usize].id;
-        }
-        if (self.count as usize + 1) * 5 > self.slots.len() * 3 {
-            let old = std::mem::replace(self, Terms::with_capacity(self.slots.len() * 2));
-            self.count = old.count;
-            for s in old.slots.into_iter().filter(|s| s.hash != 0) {
-                self.place(s);
-            }
-        }
-        self.place(Slot {
-            hash: h,
-            id: self.count,
-        });
-        self.count += 1;
-        self.count - 1
-    }
-
     fn place(&mut self, slot: Slot) {
         let mut i = slot.hash as usize & self.mask;
         while self.slots[i].hash != 0 {
             i = (i + 1) & self.mask;
         }
         self.slots[i] = slot;
-    }
-
-    /// The slot index of the term with hash `h`, or NONE if it is not a query term.
-    fn find(&self, h: u64) -> u32 {
-        let mut i = h as usize & self.mask;
-        loop {
-            let x = self.slots[i].hash;
-            if x == h {
-                return i as u32;
-            }
-            if x == 0 {
-                return NONE;
-            }
-            i = (i + 1) & self.mask;
-        }
     }
 }
 
