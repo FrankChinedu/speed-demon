@@ -262,8 +262,7 @@ impl Seen<'_> {
 }
 
 fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
-    let unmatched = (aggs.len() - 1) as u16;
-    let mut batch = [(0, 0, 0); BATCH];
+    let mut batch = [Rec::default(); BATCH];
     let mut n = 0;
     let mut p = 0;
     if first {
@@ -289,49 +288,73 @@ fn parse(c: &[u8], first: bool, region: &[u16], aggs: &mut [Agg], names: &Names,
                 None => 0,
             };
 
-        let g = match region.get(region_id as usize) {
-            Some(&r) if r != NO_REGION => r as usize,
-            _ => unmatched as usize,
+        // The region table is 2 MB, so this is a likely miss: start it now and join
+        // the record when its batch is flushed.
+        prefetch(&region[(region_id as usize).min(region.len() - 1)]);
+        batch[n] = Rec {
+            id,
+            region_id,
+            cents,
+            name_bytes: (name.len() - name.escapes) as u32,
+            note_bytes: (note.len() - note.escapes) as u32,
+            name: (name.start, name.end_content),
         };
-        let a = &mut aggs[g];
-        a.count += 1;
-        a.id_sum += id;
-        a.amount_sum += cents;
-        a.amount_min = a.amount_min.min(cents);
-        a.amount_max = a.amount_max.max(cents);
-        a.name_bytes += (name.len() - name.escapes) as u64;
-        a.note_bytes += (note.len() - note.escapes) as u64;
-
-        batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen);
+            flush(c, &batch, region, aggs, names, seen);
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen);
+    flush(c, &batch[..n], region, aggs, names, seen);
 }
 
-/// Records per interning batch.
+/// Records per batch.
 const BATCH: usize = 32;
 
-/// Interns a batch of (country, name start, name end) and marks each pair seen. Every
-/// lookup is a likely cache miss into the shared tables, so they go in passes: hash
-/// and prefetch every slot, then resolve the ids and prefetch their bitset words,
-/// then set the bits. The misses of one pass overlap instead of each record waiting
-/// for its own.
-fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen) {
+/// A parsed record waiting for its batch to be joined and interned.
+#[derive(Clone, Copy, Default)]
+struct Rec {
+    id: u64,
+    region_id: u64,
+    cents: i64,
+    name_bytes: u32,
+    note_bytes: u32,
+    name: (usize, usize),
+}
+
+/// Joins and aggregates a batch of records, interns their names and marks each
+/// (country, name) pair seen. Every lookup is a likely cache miss into a large table,
+/// so they go in passes: join each record (its region was prefetched while parsing),
+/// hash its name and prefetch the name slot; then resolve the ids and prefetch their
+/// bitset words; then set the bits. The misses of one pass overlap instead of each
+/// record waiting for its own.
+fn flush(c: &[u8], batch: &[Rec], region: &[u16], aggs: &mut [Agg], names: &Names, seen: &Seen) {
+    let unmatched = aggs.len() - 1;
+    let mut groups = [0usize; BATCH];
     let mut hashes = [0u64; BATCH];
-    for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
-        *h = Names::hash(c, start, end - start);
+    for ((g, h), r) in groups.iter_mut().zip(&mut hashes).zip(batch) {
+        *g = match region.get(r.region_id as usize) {
+            Some(&g) if g != NO_REGION => g as usize,
+            _ => unmatched,
+        };
+        let a = &mut aggs[*g];
+        a.count += 1;
+        a.id_sum += r.id;
+        a.amount_sum += r.cents;
+        a.amount_min = a.amount_min.min(r.cents);
+        a.amount_max = a.amount_max.max(r.cents);
+        a.name_bytes += r.name_bytes as u64;
+        a.note_bytes += r.note_bytes as u64;
+        *h = Names::hash(c, r.name.0, r.name.1 - r.name.0);
         names.prefetch_slot(*h);
     }
+    let (groups, hashes) = (&groups[..batch.len()], &hashes[..batch.len()]);
     let mut ids = [0u32; BATCH];
-    for ((id, &h), &(g, ..)) in ids.iter_mut().zip(&hashes).zip(batch) {
+    for ((id, &h), &g) in ids.iter_mut().zip(hashes).zip(groups) {
         *id = names.id(h);
         seen.prefetch(g, *id);
     }
-    for (&id, &(g, ..)) in ids.iter().zip(batch) {
+    for (&id, &g) in ids.iter().zip(groups) {
         seen.insert(g, id);
     }
 }
