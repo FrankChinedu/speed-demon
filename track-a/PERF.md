@@ -48,3 +48,8 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 9c83538 | FAILED EXPERIMENT: two halves of each chunk parsed in lockstep: no change; reverted | run-343c93875116 | 0.0404 | 22.5 | 491 | 32.31 |
 | e041e16 | TIMING PROBE (fails the hash on purpose): lookups done, records independent of them: the lookup work itself is the ~10 ms | run-6bab828bfa12 | 0.0338 | 18.0 | - | - |
 | 0ad8d98 | FAILED EXPERIMENT: cold insert path out of line: no gain (box noisy this run); reverted | run-0ab5b869a85f | 0.0437 | 23.9 | 479 | 30.80 |
+| 01fdee3 | noise check: docs-only commit, code unchanged from 4dd375f | run-e3e705c92504 | 0.0442 | 23.6 | 475 | 30.75 |
+| 14db9e8 | FAILED EXPERIMENT: bucketed endpoint table, eight one-word slots per bucket compared with selects (no probe loop): within noise, +15 lines; reverted | run-264d7a39c5c5 | 0.0426 | 21.6 | 490 | 31.71 |
+| 211cbe9 | input read with pread into 128 KB per-thread buffers instead of mmap: time within noise, -26 lines, +1 MB | run-de8b3fa36b19 | 0.0425 | 23.8 | 449 | 31.58 |
+| 8c6f070 | folded-multiply hash step (correctness: FxHash collided on near-duplicate names): no time change | run-ca8f39816221 | 0.0394 | 24.5 | 450 | 32.59 |
+| 1abd716 | code unchanged from 8c6f070 | run-5c0459801eb9 | 0.0410 | 23.7 | 450 | 32.16 |

@@ -43,3 +43,7 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 209c01f | TIMING PROBE (fails the hash on purpose): no name interning: interning and the shared bitset cost ~21 ms | run-caa95fc37fcf | 0.0361 | 8.3 | - | - |
 | 241d75d | FAILED EXPERIMENT: owner-written bitset rows (no locked RMW), byte region table: 2 ms faster but more memory and lines, lower K; reverted | run-a6ac5a373a1e | 0.0552 | 12.9 | 542 | 24.83 |
 | 0ad8d98 | FAILED EXPERIMENT: cold claim path out of line: no gain; reverted | run-3f1b11477bac | 0.0599 | 11.4 | 500 | 24.70 |
+| 01fdee3 | noise check: docs-only commit, code unchanged from 4dd375f | run-34ab624a63be | 0.0594 | 11.0 | 493 | 25.06 |
+| 8c6f070 | folded-multiply hash step (correctness: FxHash collided on near-duplicate names): no time change | run-cbd75f941041 | 0.0588 | 11.2 | 494 | 25.09 |
+| 1abd716 | FAILED EXPERIMENT: region join batched with the name lookups (region slot prefetched): within noise, +19 lines; reverted | run-7bcd424bccf7 | 0.0578 | 11.9 | 513 | 24.86 |
+| 3dfa93b | AVX2 field scan, 32 bytes per step | run-dfda535984a0 | 0.0550 | 11.3 | 506 | 25.79 |
