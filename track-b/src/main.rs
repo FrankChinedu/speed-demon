@@ -71,20 +71,34 @@ struct Plan {
     key_first: Vec<u32>,
 }
 
-/// Posting sets of the BOOL terms for one chunk of documents, as offsets from `base`.
-/// A sparse term is an ascending list, `docs[offsets[b]..offsets[b + 1]]`. A term in
-/// more than 1/16 of the chunk's documents is a bitmap instead (never larger than
-/// its list would be), listed in `dense` by term with its first word in `bits`, and
-/// marked in `is_dense`, so a term absent from the chunk (most rare terms, in most
-/// chunks) is answered without searching `dense`.
-struct ChunkIndex {
+/// Posting sets of the BOOL terms for one chunk of documents, as offsets from `base`,
+/// read through the thread's per-term arrays: a term's count in the chunk (0: absent)
+/// and `pos`. A sparse term is the ascending list `docs[pos - count..pos]`; a term in
+/// more than 1/64 of the chunk's documents is a bitmap instead, at `bits[pos &
+/// !DENSE..]`.
+struct ChunkIndex<'a> {
     base: u32,
     words: usize,
-    offsets: Vec<u32>,
+    seen: &'a [(u16, u16)],
+    pos: &'a [u32],
     docs: Vec<u16>,
-    dense: Vec<(u32, u32)>,
-    is_dense: Vec<u64>,
     bits: Vec<u64>,
+}
+
+const DENSE: u32 = 1 << 31;
+
+impl ChunkIndex<'_> {
+    #[inline]
+    fn set(&self, b: u32) -> Set<'_> {
+        let (count, p) = (self.seen[b as usize].1 as usize, self.pos[b as usize]);
+        if count == 0 {
+            return Set::List(&[]);
+        }
+        match p & DENSE {
+            0 => Set::List(&self.docs[p as usize - count..p as usize]),
+            _ => Set::Bits(&self.bits[(p & !DENSE) as usize..][..self.words]),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,20 +107,6 @@ enum Set<'a> {
     Bits(&'a [u64]),
 }
 
-impl ChunkIndex {
-    #[inline]
-    fn set(&self, b: u32) -> Set<'_> {
-        let list =
-            &self.docs[self.offsets[b as usize] as usize..self.offsets[b as usize + 1] as usize];
-        if !list.is_empty() || !has(&self.is_dense, b as usize) {
-            return Set::List(list);
-        }
-        match self.dense.binary_search_by_key(&b, |&(t, _)| t) {
-            Ok(i) => Set::Bits(&self.bits[self.dense[i].1 as usize..][..self.words]),
-            Err(_) => Set::List(list),
-        }
-    }
-}
 
 /// The running result of a BOOL query inside one chunk, kept as a list or a bitmap
 /// depending on what it last met. Buffers are reused across queries.
@@ -280,6 +280,8 @@ fn main() {
                     let mut postings = Postings {
                         groups: vec![Vec::new(); GROUPS],
                         seen: vec![(u16::MAX, 0); plan.n_bool + 1],
+                        touched: Vec::new(),
+                        pos: vec![0; plan.n_bool],
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
@@ -327,6 +329,7 @@ fn main() {
                             }
                             shared[q].add(&result);
                         }
+                        postings.reset();
                     }
                     matches
                 })
@@ -408,6 +411,12 @@ struct Postings {
     /// in 4 bytes so a token touches one small cache line. The spare last entry is
     /// never written.
     seen: Vec<(u16, u16)>,
+    /// The BOOL terms with a posting in this chunk, in order of first posting: the
+    /// chunk's index is built, and `seen` reset, over these alone.
+    touched: Vec<u32>,
+    /// Per BOOL term, meaningful only while its count is not 0: where its postings
+    /// end in the chunk's list buffer, or DENSE | where its bitmap starts.
+    pos: Vec<u32>,
     shift: u32,
 }
 
@@ -420,47 +429,42 @@ impl Postings {
         // has n_bool + 1 entries.
         let seen = unsafe { self.seen.get_unchecked_mut(b as usize) };
         if seen.0 != offset as u16 {
+            if seen.1 == 0 {
+                self.touched.push(b);
+            }
             *seen = (offset as u16, seen.1 + 1);
             self.groups[b as usize >> self.shift].push(offset << 16 | b);
         }
     }
 
-    /// Turns the chunk's postings into its index and empties the buffers. Documents
-    /// were visited in order, so every list comes out ascending.
-    fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
-        let n_bool = self.seen.len() - 1;
+    /// Turns the chunk's postings into its index and empties the posting buffers.
+    /// Documents were visited in order, so every list comes out ascending. Only the
+    /// terms the chunk touched are visited.
+    fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex<'_> {
         let words = n_docs.div_ceil(64);
-        // Dense terms (in more than 1/64 of the documents) become bitmaps and get an
-        // empty list range.
-        let mut offsets = vec![0u32; n_bool + 1];
-        let mut dense = Vec::new();
-        let mut is_dense = vec![0u64; n_bool.div_ceil(64)];
-        let mut slot = vec![u32::MAX; n_bool];
-        let mut total = 0;
-        for (b, (last, c)) in self.seen[..n_bool].iter_mut().enumerate() {
-            offsets[b] = total;
-            if *c as usize * 64 > n_docs {
-                slot[b] = (dense.len() * words) as u32;
-                dense.push((b as u32, slot[b]));
-                is_dense[b / 64] |= 1 << (b % 64);
+        let (mut total, mut dense) = (0, 0);
+        for &b in &self.touched {
+            let c = self.seen[b as usize].1 as u32;
+            if c as usize * 64 > n_docs {
+                self.pos[b as usize] = DENSE | (dense * words) as u32;
+                dense += 1;
             } else {
-                total += *c as u32;
+                // A list's start: the scatter below moves it to the list's end.
+                self.pos[b as usize] = total;
+                total += c;
             }
-            (*last, *c) = (u16::MAX, 0);
         }
-        offsets[n_bool] = total;
-        let mut cursor = offsets.clone();
         let mut docs = vec![0u16; total as usize];
-        let mut bits = vec![0u64; dense.len() * words];
+        let mut bits = vec![0u64; dense * words];
         for group in &mut self.groups {
             for &p in group.iter() {
                 let (d, b) = ((p >> 16) as usize, (p & 0xffff) as usize);
-                match slot[b] {
-                    u32::MAX => {
-                        docs[cursor[b] as usize] = d as u16;
-                        cursor[b] += 1;
-                    }
-                    w => bits[w as usize + d / 64] |= 1 << (d % 64),
+                let pos = &mut self.pos[b];
+                if *pos & DENSE == 0 {
+                    docs[*pos as usize] = d as u16;
+                    *pos += 1;
+                } else {
+                    bits[(*pos & !DENSE) as usize + d / 64] |= 1 << (d % 64);
                 }
             }
             group.clear();
@@ -468,12 +472,19 @@ impl Postings {
         ChunkIndex {
             base,
             words,
-            offsets,
+            seen: &self.seen,
+            pos: &self.pos,
             docs,
-            dense,
-            is_dense,
             bits,
         }
+    }
+
+    /// Forgets the chunk: the touched terms' counts go back to 0.
+    fn reset(&mut self) {
+        for &b in &self.touched {
+            self.seen[b as usize] = (u16::MAX, 0);
+        }
+        self.touched.clear();
     }
 }
 
