@@ -373,3 +373,7 @@ bfafaeb	d	run-23b89a4be2b5	0.2199	129.0	542	18.31	in-edges read back from the ou
 1e03453	b	run-ae0c70a17d1f	0.3008	88.2	892	18.49	one malloc arena (M_ARENA_MAX = 1): M 91.9 -> 88.2
 1e03453	c	run-eb5ecd707f42	0.0410	11.0	515	29.96	
 1e03453	d	run-79c9c91fe995	0.0144	8.0	-	-	TIMING PROBE (fails the hash on purpose): exits after the counting parse: 14.4 ms, M 8.0, so the ~23 MB above the arrays comes during the build, not from the process or its threads
+8ce6ac2	a	run-1e14832326e7	0.0322	21.6	548	35.91	code unchanged from bfafaeb
+8ce6ac2	b	run-463b8ed9da48	0.2958	80.7	907	18.93	BOOL queries evaluated on each chunk while its index is in cache, index dropped, per-thread summaries merged: M 88.2 -> 80.7, T 0.2958 (same as recent samples)
+8ce6ac2	c	run-4d9308ec06aa	0.0406	11.1	515	30.08	
+8ce6ac2	d	run-3ead8c2a70bd	0.2200	127.7	541	18.34	in-edges from the out rows, second sample: 0.2200 again, no faster than the second parse; reverted
