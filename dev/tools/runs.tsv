@@ -457,9 +457,9 @@ bea6fc6	d	run-fe4f72d93974	0.2503	128.0	541	17.19	code unchanged from 6753993 (0
 0a4806e	b	run-0a55e9be56d4	0.2743	53.1	976	21.15	EXPERIMENT: twelve chunks per thread: T 0.2743, M 53.1, K 21.15: past the best (eight); back to eight
 0a4806e	c	run-50f7e639ce93	0.0404	11.2	529	29.91	
 0a4806e	d	run-ffa72f19b1eb	0.2111	125.0	541	18.81	code unchanged from 6753993
-0c26e3f	a	run-8ebc60b0d991	0.0285	21.9	522	38.32	
+0c26e3f	a	run-8ebc60b0d991	0.0285	21.9	522	38.32	TUNING: 64 KB read chunks (first sample; the box ran slow: C unchanged was 0.0450)
 0c26e3f	b	run-ff7cdeaf2606	0.2532	57.7	977	21.64	eight chunks per thread and the packed count/sum summary (pushed as 5c3f422): 0.2532, M 57.7, K 21.64, best so far
-0c26e3f	c	run-475e06df7643	0.0450	10.5	529	28.78	
+0c26e3f	c	run-475e06df7643	0.0450	10.5	529	28.78	code unchanged (a slow box run)
 0c26e3f	d	run-4b4b97a8c377	0.2019	122.8	541	19.30	code unchanged from 6753993
 440c037	a	run-bf6b625489eb	0.0265	21.3	522	39.96	
 440c037	b	run-d4460d2736f9	0.2667	41.0	1007	22.16	one shared summary per BOOL query (atomic count/sum, ten smallest under a per-query lock) instead of one per thread: M 57.7 -> 41.0, T 0.2667, K 22.16, best so far
