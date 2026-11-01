@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 0ee7820)
+HEAD is now at 0ee7820 Track B: corpus pass reads a compact copy of the term table, one word per slot (46-bit hash tag | BOOL index and keyed flag): 1 MB instead of 2 MB; a term's slot is its id after the plan
+$ cargo build --release -q
+### A/B track b: base ffbc9b1 vs head 0ee7820
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1037.45 | 1028.48 | OK |
+| head | 1019.82 | 1016.59 | OK |
+
+speedup base/head 1.017, 95% CI [1.012, 1.028]: **head FASTER**
