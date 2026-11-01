@@ -477,3 +477,11 @@ d9cdcc7	a	run-3374c0a7620e	0.0280	21.5	522	38.78
 d9cdcc7	b	run-b6fb144e1767	0.2450	48.6	1007	22.67	six chunks per thread with shared summaries, final setting (second sample): 0.2450, M 48.6, K 22.67
 d9cdcc7	c	run-b866eb79e1c1	0.0410	10.9	529	29.86	
 d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
+16345d2	a	run-5f8247f9366a	0.0262	21.4	522	40.16	
+16345d2	c	run-d0ebd5558a64	0.0401	10.6	529	30.41	
+16345d2	d	run-2787588e79e8	0.2048	126.8	541	19.04	code unchanged from 6753993
+16345d2	b	run-9578547a6a23	0.1412	20.5	-	-	TIMING PROBE (fails the hash on purpose): tokenizing only, current code: 141 ms of a ~244 ms run, so postings, scatter, queries and output are ~103 ms
+056f68d	a	run-00700ac17846	0.0266	22.4	522	39.50	
+056f68d	b	run-f9140b400283	0.2429	45.3	1011	23.08	chunk index over the touched terms only (no per-chunk tables over all 53,000 terms): T 0.2429, M 45.3, K 23.08, best so far (x86 A/B 0.989, no clear difference on the runner's 30 chunks)
+056f68d	c	run-d2d38e54034a	0.0430	10.8	529	29.26	
+056f68d	d	run-708957b96d0b	0.2067	128.9	541	18.89	code unchanged from 6753993
