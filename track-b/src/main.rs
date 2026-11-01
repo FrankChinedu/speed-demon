@@ -200,15 +200,36 @@ impl Acc {
 }
 
 fn emit(s: Set, base: u32, out: &mut Summary) {
+    // Documents one by one until the ten smallest are known, then only the count and
+    // sum, in bulk: a list's sum vectorises, and a bitmap word adds its popcount and
+    // the sum of its set bit positions (six masked popcounts).
+    const POS: [u64; 6] = [
+        0xaaaa_aaaa_aaaa_aaaa,
+        0xcccc_cccc_cccc_cccc,
+        0xf0f0_f0f0_f0f0_f0f0,
+        0xff00_ff00_ff00_ff00,
+        0xffff_0000_ffff_0000,
+        0xffff_ffff_0000_0000,
+    ];
     match s {
-        Set::List(l) => l.iter().for_each(|&d| out.add(base + d as u32)),
+        Set::List(l) => {
+            let k = l.len().min(10 - out.count.min(10) as usize);
+            l[..k].iter().for_each(|&d| out.add(base + d as u32));
+            let rest = &l[k..];
+            out.count += rest.len() as u32;
+            out.sum += base as u64 * rest.len() as u64 + rest.iter().map(|&d| d as u64).sum::<u64>();
+        }
         Set::Bits(b) => {
             for (k, &w) in b.iter().enumerate() {
-                let mut w = w;
-                while w != 0 {
-                    out.add(base + (k * 64) as u32 + w.trailing_zeros());
+                let (mut w, at) = (w, base + (k * 64) as u32);
+                while w != 0 && out.count < 10 {
+                    out.add(at + w.trailing_zeros());
                     w &= w - 1;
                 }
+                let ones = w.count_ones();
+                let pos: u32 = (0..6).map(|j| (w & POS[j]).count_ones() << j).sum();
+                out.count += ones;
+                out.sum += ones as u64 * at as u64 + pos as u64;
             }
         }
     }
