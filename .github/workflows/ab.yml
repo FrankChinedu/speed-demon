@@ -30,6 +30,9 @@ jobs:
   ab:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # Write access only to commit the result back to the ab/ branch that started it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,4 +53,15 @@ jobs:
             HEAD_REF=$(python3 -c 'import json;print(json.load(open("dev/ab.json"))["head"])')
             RUNS=$(python3 -c 'import json;print(json.load(open("dev/ab.json")).get("runs", 15))')
           fi
-          python3 dev/tools/ab.py "$TRACK" "$BASE" "$HEAD_REF" "$RUNS"
+          python3 dev/tools/ab.py "$TRACK" "$BASE" "$HEAD_REF" "$RUNS" 2>&1 | tee /tmp/ab.log
+      # On an ab/ branch push, the result is committed back to that branch, so it can
+      # be read with a plain git fetch.
+      - if: always() && github.event_name == 'push'
+        run: |
+          git worktree prune
+          tail -n 12 /tmp/ab.log > dev/ab-result.txt
+          git config user.name "ab-workflow"
+          git config user.email "ab-workflow@users.noreply.github.com"
+          git add dev/ab-result.txt
+          git commit -q -m "ab result"
+          git push origin HEAD:${{ github.ref }}
