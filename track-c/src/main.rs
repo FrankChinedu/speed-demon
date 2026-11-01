@@ -324,7 +324,10 @@ fn intern(c: &[u8], batch: &[(usize, usize, usize)], names: &Names, seen: &Seen)
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
         *h = Names::hash(c, start, end - start);
-        names.prefetch_slot(*h);
+        std::hint::black_box(*h);
+    }
+    if !batch.is_empty() {
+        return; // TIMING PROBE: names hashed, no table lookup, no bitset
     }
     let mut ids = [0u32; BATCH];
     for ((id, &h), &(g, ..)) in ids.iter_mut().zip(&hashes).zip(batch) {
