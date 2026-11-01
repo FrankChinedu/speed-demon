@@ -15,6 +15,8 @@ Before the first push, steps were measured locally with `tools/sd.py bench` (Doc
 - Verified on seeds 1, 2 and 3 at tiny and sample scale, and on seed 1 at full, against the reference's output.
 - `name_bytes` and `note_bytes` are raw lengths minus the number of `""` escapes, so no field is ever copied.
 
+- **What moved the box most:** the AVX2 field scan, one-byte BOM test (1.080x on the x86 A/B runner), the inlined field reader (1.039x), sharded batched bitset writes (1.073x), per-thread blocks of name ids (box only: the shared counter is contended by 12 threads), the one-byte region table (M 11.8 -> 10.6 MB) and PGO (1.049x). The x86 A/B runner (`dev/tools/ab.py`) has only 2 CPUs, so several of its wins (batched join, vector name hash) did not show on the box and were reverted.
+
 ## Board runs
 
 Every step measured on the scoring box by the live board, in order. Rows marked FAILED EXPERIMENT were measured and reverted.
@@ -47,3 +49,31 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 8c6f070 | folded-multiply hash step (correctness: FxHash collided on near-duplicate names): no time change | run-cbd75f941041 | 0.0588 | 11.2 | 494 | 25.09 |
 | 1abd716 | FAILED EXPERIMENT: region join batched with the name lookups (region slot prefetched): within noise, +19 lines; reverted | run-7bcd424bccf7 | 0.0578 | 11.9 | 513 | 24.86 |
 | 3dfa93b | AVX2 field scan, 32 bytes per step | run-dfda535984a0 | 0.0550 | 11.3 | 506 | 25.79 |
+| babcf41 | AVX2 field scan, second run (code of 3dfa93b) | run-39e8f2e48db0 | 0.0554 | 11.3 | 506 | 25.69 |
+| 7dbbf8a | TIMING PROBE (fails the hash on purpose): names hashed, no table lookup, no bitset: lookup plus bitset cost about 19 ms | run-7bbabded3017 | 0.0361 | 7.5 | - | - |
+| 4ad05b8 | TIMING PROBE (fails the hash on purpose): names looked up, no bitset prefetch or writes: the bitset costs about 1 ms, the name lookup about 18 ms | run-4f457ea453b8 | 0.0540 | 7.8 | - | - |
+| e542027 | seen-bitset writes queued per thread by shard of countries, applied under one lock per 2048 pairs | run-c10022693196 | 0.0477 | 13.6 | 530 | 26.49 |
+| 4c412e0 | text field reader forced inline (x86 A/B 1.039x); board noise: slower than the run before | run-d8f7e20fd693 | 0.0531 | 14.0 | 530 | 24.98 |
+| 0abea93 | region join batched with the name lookups (x86 A/B 1.024x); box: no better than 4c412e0 | run-47cadd8d72a8 | 0.0532 | 14.0 | 551 | 24.80 |
+| 8cab084 | check: sharded bitset alone (code of e542027) is also ~0.053 on the box, so e542027 at 0.0477 was a lucky run | run-33d21f3ee9b6 | 0.0526 | 14.4 | 530 | 24.94 |
+| fdec699 | forced-inline field reader; bitset queues of 256 pairs instead of 2048: memory back to 11.8 MB | run-7c5f12f6cc30 | 0.0474 | 11.8 | 530 | 27.35 |
+| 27a96ae | name ids reserved 256 at a time per thread; one-byte region table: M 10.6 MB | run-fdce8690114a | 0.0452 | 10.6 | 569 | 28.30 |
+| 635fc59 | code unchanged from 27a96ae | run-c0c4da44881b | 0.0448 | 11.1 | 569 | 28.16 |
+| ff44fa3 | BOM detected by its first byte, no memcmp call per record (x86 A/B 1.080x) | run-3f7cbc038582 | 0.0419 | 11.2 | 569 | 29.12 |
+| 851ead2 | name hash without the murmur3 finaliser (x86 A/B 1.021x) | run-7c6b51a8a5cc | 0.0412 | 10.6 | 565 | 29.66 |
+| 83fb9ee | code unchanged from 851ead2 (second sample) | run-568c9acacfe9 | 0.0411 | 10.6 | 565 | 29.72 |
+| 64ac480 | code unchanged from 851ead2 (third sample) | run-95ae19619dee | 0.0413 | 10.9 | 565 | 29.49 |
+| 257172c | FAILED EXPERIMENT: names under 32 bytes hashed by one AVX2 XXH3 step (x86 A/B 1.029x): no visible gain on the box, +38 lines, lower K; reverted | run-1adcc68356e0 | 0.0409 | 10.8 | 603 | 29.38 |
+| 46626c1 | code of 851ead2 (XXH3 name hash reverted) | run-d0fdac40f096 | 0.0410 | 11.0 | 565 | 29.56 |
+| dd8490a | FAILED EXPERIMENT: 32 chunks per thread instead of 8: no gain; reverted | run-e20a32f76633 | 0.0422 | 10.6 | 565 | 29.30 |
+| 6ed2372 | code unchanged from 851ead2 | run-5b6a281a3a91 | 0.0413 | 11.1 | 565 | 29.36 |
+| 4a09495 | TIMING PROBE (fails the hash on purpose): parse and join, no name interning: 27.9 ms, so interning and the bitset cost ~13.4 ms | run-c67933267f82 | 0.0279 | 7.5 | - | - |
+| 022abb8 | code unchanged from 851ead2 | run-e3d43c225be2 | 0.0434 | 11.1 | 565 | 28.66 |
+| 8172e57 | TIMING PROBE (fails the hash on purpose): exits after loading regions.csv: 3.1 ms of serial start-up | run-4af1957f0861 | 0.0031 | 7.9 | - | - |
+| 6de5579 | FAILED EXPERIMENT: regions.csv loaded by all threads in two passes: no gain (two more thread spawns cost what it saved), +41 lines; reverted | run-216886e90743 | 0.0425 | 11.0 | 608 | 28.67 |
+| 1fa8e0d | 565 -> 515 code lines (x86 A/B within noise) | run-458d2f1e49c4 | 0.0410 | 11.0 | 515 | 29.96 |
+| bc5e6ce | code unchanged from 1fa8e0d | run-43f317ca7e9f | 0.0417 | 10.5 | 515 | 30.00 |
+| 7f10e38 | FAILED EXPERIMENT (a5e47cc): huge pages left on with one malloc arena: no gain; reverted | run-7a42b5487298 | 0.0413 | 10.6 | 515 | 30.06 |
+| 529b16e | FAILED TUNING: interning batches of 16: 0.0410 and 0.0409, no change; reverted | run-36b1c4a30c6c | 0.0410 | 11.2 | 515 | 29.85 |
+| f6cc5dc | code of 529b16e (second sample) | run-ade2730ae19d | 0.0409 | 11.0 | 515 | 29.99 |
+| ecdc8d2 | FAILED TUNING (7865cb4): bitset queues of 512: M 11.3 (from ~10.8), T unchanged; reverted | run-bdedccb4b1e8 | 0.0406 | 11.3 | 515 | 29.96 |
