@@ -246,3 +246,7 @@ e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
 14db9e8	b	run-86ef963b98f5	0.3015	99.8	866	18.10	
 14db9e8	c	run-e927a3d6ce56	0.0579	11.8	493	25.02	
 14db9e8	d	run-98b2901a3e86	0.2002	159.9	507	18.57	
+211cbe9	a	run-de8b3fa36b19	0.0425	23.8	449	31.58	input read with pread into 128 KB per-thread buffers instead of mmap: time within noise, -26 lines, +1 MB
+211cbe9	b	run-d656ae5d9a66	0.2981	99.5	866	18.22	
+211cbe9	c	run-bacaf708ef1b	0.0579	11.0	493	25.37	
+211cbe9	d	run-9fa264c73350	0.1977	160.0	507	18.68	

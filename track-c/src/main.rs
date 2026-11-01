@@ -22,9 +22,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::thread;
 
-/// FxHash step: one multiply per 8-byte word. Names are short and not adversarial.
+/// One step of the name hash per 8-byte word: the folded multiply of foldhash and
+/// wyhash. The halves of the full 128-bit product are xored, so every input bit
+/// reaches every output bit. The FxHash step this replaced, a plain 64-bit multiply,
+/// only carries a change upward: names differing in their 8th and 9th bytes collided
+/// in all 64 bits about once in 32 (seed 6 has "Dacom Mina" and "Dacom Maca", which
+/// were counted as one name).
 fn mix(h: u64, w: u64) -> u64 {
-    (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95)
+    let m = (h ^ w) as u128 * 0x9e37_79b9_7f4a_7c15;
+    m as u64 ^ (m >> 64) as u64
 }
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";

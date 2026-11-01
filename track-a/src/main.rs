@@ -385,9 +385,15 @@ fn latency(line: &[u8], p: usize) -> (u32, usize) {
     (v, j)
 }
 
+/// One step of the endpoint hash per 8-byte word: the folded multiply of foldhash and
+/// wyhash. The halves of the full 128-bit product are xored, so every input bit
+/// reaches every output bit. The FxHash step this replaced, a plain 64-bit multiply,
+/// only carries a change upward: names differing in their 8th and 9th bytes collided
+/// in all 64 bits about once in 32 (track C met such a pair on seed 6).
 #[inline]
 fn mix(h: u64, w: u64) -> u64 {
-    (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95)
+    let m = (h ^ w) as u128 * 0x9e37_79b9_7f4a_7c15;
+    m as u64 ^ (m >> 64) as u64
 }
 
 /// The murmur3 finalizer: spreads every input bit over the whole word.
