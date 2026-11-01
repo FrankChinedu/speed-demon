@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 23f2428)
+HEAD is now at 23f2428 Track B: branch-free first-occurrence test for BOOL postings (every token writes its term to a per-document list; the position advances only for a BOOL term new to the document; terms in no BOOL query use a spare entry)
+$ cargo build --release -q
+### A/B track b: base ffbc9b1 vs head 23f2428
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 889.87 | 876.32 | OK |
+| head | 919.99 | 904.93 | OK |
+
+speedup base/head 0.967, 95% CI [0.955, 0.981]: **head SLOWER**
