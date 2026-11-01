@@ -288,25 +288,9 @@ fn parse(
             // The method starts at byte 28 and is at most 7 bytes, so the space after it
             // is in the next word: no branch on which method it is.
             let ep_start = 29 + first_byte(word(line, 28), SPACES);
-            // Find the space after the endpoint eight bytes at a time, hashing each word
-            // on the way, so the endpoint is scanned once for both jobs.
-            let (mut k, mut h) = (ep_start, 0u64);
-            let ep_end = loop {
-                let w = word(line, k);
-                let x = w ^ SPACES;
-                let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
-                if spaces != 0 {
-                    let n = spaces.trailing_zeros() as usize / 8;
-                    h = mix(h, w & ((1u64 << (n * 8)) - 1));
-                    break k + n;
-                }
-                h = mix(h, w);
-                k += 8;
-            };
-            let id = table.id(
-                &line[ep_start..ep_end],
-                mix(h, (ep_end - ep_start) as u64) | 1,
-            );
+            let (ep_len, h) = endpoint(line, ep_start);
+            let ep_end = ep_start + ep_len;
+            let id = table.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -351,6 +335,94 @@ fn word(b: &[u8], i: usize) -> u64 {
             w[..tail.len()].copy_from_slice(tail);
             u64::from_le_bytes(w)
         }
+    }
+}
+
+/// The endpoint starting at `b[at]`: its length and the hash of its bytes. With AVX2,
+/// one compare of the 64 bytes at `at` finds the space after any name of up to 63
+/// bytes (about 95% of lines), and the name is hashed in a fixed run of vector steps:
+/// no branch depends on its length. Longer names, and builds without AVX2, are
+/// scanned and hashed a word at a time. Which form hashes a name depends only on its
+/// length, so a name always gets the same hash.
+#[inline]
+fn endpoint(b: &[u8], at: usize) -> (usize, u64) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        let mut pad = [0u8; 64]; // near the end of the input: zeros are not spaces
+        let block: &[u8; 64] = match b.get(at..at + 64) {
+            Some(w) => w.try_into().unwrap(),
+            None => {
+                pad[..b.len() - at].copy_from_slice(&b[at..]);
+                &pad
+            }
+        };
+        if let Some(found) = short_endpoint(block) {
+            return found;
+        }
+    }
+    let (mut k, mut h) = (at, 0u64);
+    loop {
+        let w = word(b, k);
+        let n = first_byte(w, SPACES);
+        if n < 8 {
+            return (k + n - at, mix(h, w & ((1u64 << (n * 8)) - 1)));
+        }
+        h = mix(h, w);
+        k += 8;
+    }
+}
+
+/// The length and hash of a name of up to 63 bytes ending at the first space in
+/// `block`, or None if `block` has no space. The hash is one XXH3 accumulate step
+/// over the eight words of the zero-padded name (each word xored with a key, the
+/// product of its halves, plus its neighbour word), the lanes summed, then two
+/// folded multiplies.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+fn short_endpoint(block: &[u8; 64]) -> Option<(usize, u64)> {
+    use std::arch::x86_64::*;
+    // SAFETY: AVX2 is enabled at compile time, both unaligned loads read inside the 64
+    // bytes of `block`, and the transmute reads a 32-byte vector as four u64s, a type
+    // of the same size for which every bit pattern is valid.
+    unsafe {
+        let v = [0, 32].map(|k| _mm256_loadu_si256(block.as_ptr().add(k) as *const __m256i));
+        let sp = _mm256_set1_epi8(b' ' as i8);
+        let spaces = v.map(|v| _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, sp)) as u32 as u64);
+        let mask = spaces[0] | spaces[1] << 32;
+        if mask == 0 {
+            return None;
+        }
+        let len = mask.trailing_zeros() as usize;
+        let lens = _mm256_set1_epi8(len as i8);
+        let first = _mm256_setr_epi8(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        );
+        let at = [first, _mm256_add_epi8(first, _mm256_set1_epi8(32))];
+        let keys = [
+            _mm256_setr_epi64x(
+                0x1cad_21f7_2c81_017cu64 as i64,
+                0xdb97_9083_e96d_d4deu64 as i64,
+                0x1f67_b3b7_a4a4_4072u64 as i64,
+                0x78e5_c0cc_4ee6_79cbu64 as i64,
+            ),
+            _mm256_setr_epi64x(
+                0x8172_6f7d_c2b5_d2b8u64 as i64,
+                0x3b9a_6d9e_4b6b_a1c5u64 as i64,
+                0xf64d_5a5f_2b1f_0b8du64 as i64,
+                0x9e6c_5a3e_7c4d_2f19u64 as i64,
+            ),
+        ];
+        let mut acc = _mm256_setzero_si256();
+        for k in 0..2 {
+            let d = _mm256_and_si256(v[k], _mm256_cmpgt_epi8(lens, at[k])); // bytes below len
+            let x = _mm256_xor_si256(d, keys[k]);
+            let product = _mm256_mul_epu32(x, _mm256_srli_epi64::<32>(x));
+            let swapped = _mm256_shuffle_epi32::<0b01_00_11_10>(d);
+            acc = _mm256_add_epi64(acc, _mm256_add_epi64(product, swapped));
+        }
+        let [a, b, c, d]: [u64; 4] = std::mem::transmute(acc);
+        Some((len, mix(mix(a, b), c ^ d.rotate_left(32))))
     }
 }
 

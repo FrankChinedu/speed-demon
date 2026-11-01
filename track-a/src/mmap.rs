@@ -14,18 +14,4 @@ pub fn small_pages() {
         // how this process's future page faults are served.
         unsafe { prctl(PR_SET_THP_DISABLE, 1u64, 0u64, 0u64, 0u64) };
     }
-    // Pin glibc's mmap threshold at 64 KB. Left dynamic, it rises to the size of the
-    // first mapped block freed, and later record blocks then come from the malloc
-    // arenas, which keep freed memory instead of returning it. Pinned, every block of
-    // 64 KB or more is its own mapping, returned the moment it is freed.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        unsafe extern "C" {
-            fn mallopt(param: i32, value: i32) -> i32;
-        }
-        const M_MMAP_THRESHOLD: i32 = -3;
-        // SAFETY: mallopt only sets an allocator tuning parameter, and runs before
-        // any thread is started.
-        unsafe { mallopt(M_MMAP_THRESHOLD, 64 << 10) };
-    }
 }

@@ -294,3 +294,7 @@ fdec699	a	run-cfeccd7afa2e	0.0378	23.9	442	33.50	code unchanged from 0abea93
 fdec699	b	run-dddfce0890ea	0.2946	99.3	866	18.33	
 fdec699	c	run-7c5f12f6cc30	0.0474	11.8	530	27.35	forced-inline field reader; bitset queues of 256 pairs instead of 2048: memory back to 11.8 MB
 fdec699	d	run-2f12c7554728	0.1958	160.0	507	18.77	
+27a96ae	a	run-b212166f107e	0.0419	21.3	450	32.49	glibc mmap threshold pinned at 64 KB: M 23.9 -> 21.3 MB but slower (x86 A/B 0.984x); reverted
+27a96ae	b	run-185ea3f60c5f	0.2956	100.1	866	18.27	
+27a96ae	c	run-fdce8690114a	0.0452	10.6	569	28.30	name ids reserved 256 at a time per thread; one-byte region table: M 10.6 MB
+27a96ae	d	run-1e003f39f112	0.1963	159.7	507	18.75	
