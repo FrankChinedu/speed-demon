@@ -531,6 +531,11 @@ fn percentiles(v: &mut [u32]) -> [u32; 3] {
     let n = v.len();
     let idx = |p: usize| (p * n).div_ceil(100) - 1;
     let (i50, i95, i99) = (idx(50), idx(95), idx(99));
+    if n <= 32 {
+        // Most groups are this small: one small sort beats three selections.
+        v.sort_unstable();
+        return [v[i50], v[i95], v[i99]];
+    }
     let p50 = *v.select_nth_unstable(i50).1;
     let p95 = if i95 == i50 {
         p50

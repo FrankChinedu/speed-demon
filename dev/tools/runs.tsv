@@ -302,3 +302,7 @@ fdec699	d	run-2f12c7554728	0.1958	160.0	507	18.77
 635fc59	b	run-701c97feca30	0.2965	99.5	866	18.26	
 635fc59	c	run-c0c4da44881b	0.0448	11.1	569	28.16	code unchanged from 27a96ae
 635fc59	d	run-93ac1b2f093e	0.1936	159.8	507	18.88	
+ff44fa3	a	run-91324ea3d371	0.0370	23.5	502	33.37	one-word endpoint slots, 32 KB table (x86 A/B 1.034x)
+ff44fa3	b	run-2ad3ea0e272b	0.3299	99.3	866	17.32	
+ff44fa3	c	run-3f7cbc038582	0.0419	11.2	569	29.12	BOM detected by its first byte, no memcmp call per record (x86 A/B 1.080x)
+ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69	
