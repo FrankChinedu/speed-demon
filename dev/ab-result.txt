@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 5fb55e8)
+HEAD is now at 5fb55e8 Track C: profile-guided optimisation (profile of an instrumented build run on full seeds 2 and 3, merged with the toolchain's llvm-profdata)
+$ cargo build --release -q
+### A/B track c: base 7865cb4 vs head 5fb55e801191
+21 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 145.98 | 144.65 | OK |
+| head | 139.14 | 137.45 | OK |
+
+speedup base/head 1.049, 95% CI [1.040, 1.062]: **head FASTER**
