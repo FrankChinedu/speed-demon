@@ -34,6 +34,11 @@ From Nov 1 afternoon, board noise on B (the same code measured 0.279 and 0.323 s
 | e7c72cb | Results summarised in bulk once their ten smallest ids are known: a bitmap word adds its popcount and the sum of its set bit positions (six masked popcounts) | 1.074 (1.071-1.077) | yes |
 | 7a33ede | Postings entry shrunk to (u16, u16) and prefetched from the tokenizer | 0.983 (0.973-0.997) | no |
 | a29740b | The (u16, u16) entry alone | 1.012 (1.001-1.015) | yes |
+| 934fc6e | Each block's token mask walked as soon as it is made (no mask buffer); token hashes written by index into a buffer sized once per document | 1.066 (1.053-1.076) | yes |
+| aa60984 | No slot prefetch in the tokenizer (the profile put 7% on the prefetch instruction) | 0.986 (0.974-1.004) | no: the time was the load it waits for |
+| ec9a972 | Token hash by three folded 64x64 -> 128-bit multiplies instead of three multiplies and a MurmurHash3 finaliser | 1.002 (0.979-1.029) | no |
+| 0297d50 | The plan in parallel (flat per-thread parse, lock-free set of distinct terms) | 0.913 (0.903-0.923) on the 2-vCPU runner | no: a box probe put it at 19.9 ms against the serial 23.0, not worth 44 lines |
+| 8c7f960 | A per-thread direct-mapped cache of recent term lookups (2,048 entries, 32 KB) | 0.792 (0.781-0.799) | no |
 
 An x86 profile (`.github/workflows/prof.yml`, perf by source line on the runner) guided the last three rows: ~10% of the run on the postings-entry miss, ~10% on the term-table probe, ~15% in `Vec` push and extend paths, ~5% in the hash finaliser.
 
