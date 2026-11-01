@@ -495,8 +495,9 @@ impl Field {
     }
 }
 
-/// Reads a quoted or unquoted text field starting at `p`.
-#[inline]
+/// Reads a quoted or unquoted text field starting at `p`. Forced inline: as a call it
+/// returns its four words through memory, twice per record.
+#[inline(always)]
 fn field(c: &[u8], p: usize) -> Field {
     if c[p] != b'"' {
         let end = find(c, p, b',');

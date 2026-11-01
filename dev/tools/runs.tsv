@@ -274,3 +274,7 @@ babcf41	d	run-82c7aa6d5d87	0.1951	160.2	507	18.80
 4ad05b8	d	run-c3227b05ae8d	0.2341	159.7	507	17.17	
 4ad05b8	a	run-58bde850099f	0.0400	21.7	-	-	TIMING PROBE (fails the hash on purpose): every hour formatted, nothing written: the output write costs about 1 ms
 4ad05b8	c	run-4f457ea453b8	0.0540	7.8	-	-	TIMING PROBE (fails the hash on purpose): names looked up, no bitset prefetch or writes: the bitset costs about 1 ms, the name lookup about 18 ms
+e542027	a	run-52b88e564fb6	0.0458	24.2	450	30.33	code unchanged from 0abefaf (noise)
+e542027	b	run-c81b6c9ae51c	0.3365	99.5	866	17.14	
+e542027	c	run-c10022693196	0.0477	13.6	530	26.49	seen-bitset writes queued per thread by shard of countries, applied under one lock per 2048 pairs
+e542027	d	run-961d2e4f493a	0.2103	159.1	507	18.13	
