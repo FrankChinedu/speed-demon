@@ -129,79 +129,62 @@ c7a2d07	d	run-5a7c64882a36	0.2074	159.9	507	18.24
 198096d	d	run-f1fb6f39571f	0.1955	160.0	507	18.78
 68dec3f	a	run-8760faae8839	0.0326	17.8	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse (256 KB mmap blocks)
 198096d	a	run-29867f0b098f	0.0310	17.5	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse, 4 KB heap blocks: same, so block mmaps are not the cost
-5a4630c	a	run-982e6bce4f52	0.0475	23.3	512	29.41
+5a4630c	a	run-982e6bce4f52	0.0475	23.3	512	29.41	FAILED EXPERIMENT: thread-local ids plus one record mapping, 16 KB blocks released by madvise: slower
 5a4630c	b	run-fd41209dd784	0.3520	83.6	860	17.38
 5a4630c	c	run-6427f9cfd9fb	0.0602	13.3	497	23.92
 5a4630c	d	run-c1712b7b3c2d	0.1973	159.9	507	18.70
-5a4630c	a	run-982e6bce4f52	0.0475	23.3	512	29.41	FAILED EXPERIMENT: thread-local ids plus one record mapping, 16 KB blocks released by madvise: slower
-1614751	a	run-09da972c1dfc	0.0432	32.9	512	28.77
+1614751	a	run-09da972c1dfc	0.0432	32.9	512	28.77	FAILED EXPERIMENT: same without releasing blocks: still slower than 59fcb1b; both reverted
 1614751	b	run-1d2ca67b4531	0.3519	83.5	860	17.38
 1614751	c	run-6ea4b149c875	0.0600	13.6	497	23.84
 1614751	d	run-dc7bbf2ecb06	0.1938	159.5	507	18.88
-1614751	a	run-09da972c1dfc	0.0432	32.9	512	28.77	FAILED EXPERIMENT: same without releasing blocks: still slower than 59fcb1b; both reverted
-70cc9cd	a	run-43815d55bb2f	0.0405	22.3	488	32.37
+70cc9cd	a	run-43815d55bb2f	0.0405	22.3	488	32.37	FAILED EXPERIMENT: MADV_POPULATE_READ per input chunk: no change; reverted
 70cc9cd	b	run-6448eea404e9	0.3566	84.1	860	17.24
 70cc9cd	c	run-bbc7f3f9fd8a	0.0640	13.6	497	23.10
 70cc9cd	d	run-c91901884e33	0.1985	160.1	507	18.64
-70cc9cd	a	run-43815d55bb2f	0.0405	22.3	488	32.37	FAILED EXPERIMENT: MADV_POPULATE_READ per input chunk: no change; reverted
-3f4cfda	a	run-7fef89ad3f28	0.0388	22.2	546	32.56
+3f4cfda	a	run-7fef89ad3f28	0.0388	22.2	546	32.56	FAILED EXPERIMENT: branch-free AVX2 endpoint scan and folded hash: 2% faster, +71 lines, lower K; reverted
 3f4cfda	b	run-c7103bb46ab9	0.3583	83.6	860	17.22
 3f4cfda	c	run-b3cc3c3cf8ec	0.0602	13.4	497	23.88
-3f4cfda	a	run-7fef89ad3f28	0.0388	22.2	546	32.56	FAILED EXPERIMENT: branch-free AVX2 endpoint scan and folded hash: 2% faster, +71 lines, lower K; reverted
 3f4cfda	d	run-e071af406290	0.0640	159.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the graph build, so queries take ~130 ms
 fe37840	a	run-d6e5022fd775	0.0394	22.3	475	32.96
 fe37840	c	run-3116fbcd961a	0.0651	13.6	497	22.90
 fe37840	d	run-0fba4ab81582	0.2071	159.9	507	18.25
 fe37840	b	run-79d6b34c3dc8	0.2718	83.8	-	-	TIMING PROBE (fails the hash on purpose): exits after the corpus pass, so queries take ~80 ms
 bd38c4c	a	run-8afabce87bb8	0.0406	21.9	475	32.55
-bd38c4c	b	run-1d8d70dc7964	0.3143	83.6	890	18.29
+bd38c4c	b	run-1d8d70dc7964	0.3143	83.6	890	18.29	newline search 32 bytes at a time, branch-free inlined token keys
 bd38c4c	c	run-daa528688cab	0.0602	13.8	497	23.74
 bd38c4c	d	run-fdd2fe362fb9	0.1945	159.9	507	18.83
-bd38c4c	b	run-1d8d70dc7964	0.3143	83.6	890	18.29	newline search 32 bytes at a time, branch-free inlined token keys
 18cf889	c	run-c815d7bad8cc	0.0591	13.5	497	24.06
 18cf889	d	run-ad7c6b303621	0.1984	160.2	507	18.64
 18cf889	a	run-589103ab56b3	0.0227	17.3	-	-	TIMING PROBE (fails the hash on purpose): parse only, endpoint table removed: the table costs ~9 ms
 18cf889	b	run-a80663e7b75a	0.1684	37.8	-	-	TIMING PROBE (fails the hash on purpose): corpus pass tokenizing only: postings and phrases cost ~100 ms
-7a08c2d	a	run-5146a0a7a7e3	0.0435	23.0	456	31.37
-7a08c2d	b	run-65de97376cdd	0.3194	81.6	915	18.16
-7a08c2d	c	run-92ec8998f957	0.0607	14.3	497	23.48
-7a08c2d	d	run-02e36896a298	0.2069	159.3	507	18.28
 7a08c2d	a	run-5146a0a7a7e3	0.0435	23.0	456	31.37	FAILED EXPERIMENT: thread-local endpoint ids alone (no registry): slower again; reverted
 7a08c2d	b	run-65de97376cdd	0.3194	81.6	915	18.16	FAILED EXPERIMENT: bulk result summaries (popcounts): no change; reverted
-81e0731	a	run-b1a450557639	0.0432	22.9	475	31.29
-81e0731	b	run-de8951943654	0.3126	84.0	890	18.33
-81e0731	c	run-59e79fdb7e13	0.0594	14.0	507	23.78
-81e0731	d	run-a10a565dbf74	0.1932	159.4	507	18.91
-81e0731	c	run-59e79fdb7e13	0.0594	14.0	507	23.78	FAILED EXPERIMENT: PREFETCHW for the shared bitset: no change; reverted
+7a08c2d	c	run-92ec8998f957	0.0607	14.3	497	23.48
+7a08c2d	d	run-02e36896a298	0.2069	159.3	507	18.28
 81e0731	a	run-b1a450557639	0.0432	22.9	475	31.29	noise check: unchanged 59fcb1b code
+81e0731	b	run-de8951943654	0.3126	84.0	890	18.33
+81e0731	c	run-59e79fdb7e13	0.0594	14.0	507	23.78	FAILED EXPERIMENT: PREFETCHW for the shared bitset: no change; reverted
+81e0731	d	run-a10a565dbf74	0.1932	159.4	507	18.91
 0f789db	a	run-0dc9c2f3b13b	0.0421	22.5	475	31.81
 0f789db	b	run-e42026db212d	0.3204	82.8	890	18.15
 0f789db	c	run-a3dac85eba50	0.0604	13.8	497	23.72
-0f789db	d	run-98a13889884e	0.2119	233.5	552	16.52
 0f789db	d	run-98a13889884e	0.2119	233.5	552	16.52	FAILED EXPERIMENT: progressive madvise of edge arrays at 4 KB granularity: THP pages split but stay charged (233 MB)
 30de835	a	run-ff96c690687f	0.0415	21.8	475	32.23
 30de835	b	run-77bd93d1a04a	0.3163	84.7	890	18.19
-30de835	c	run-9ae715470d5f	0.0573	11.3	493	25.36
-30de835	d	run-fee778b3c1f5	0.1991	236.0	552	17.00
 30de835	c	run-9ae715470d5f	0.0573	11.3	493	25.36	one-word name slots (40-bit tag above the id): 2 MB table instead of 4 MB
 30de835	d	run-fee778b3c1f5	0.1991	236.0	552	17.00	FAILED EXPERIMENT: same with 2 MB-aligned release: memory still not returned on the box; reverted
 5892567	a	run-ed690377d050	0.0421	22.9	475	31.70
 5892567	b	run-26b4f8a5c131	0.3133	83.3	890	18.34
-5892567	c	run-1702f527be4c	0.0586	13.7	515	23.98
-5892567	d	run-bbbd84e1a18c	0.1914	159.4	507	19.00
 5892567	c	run-1702f527be4c	0.0586	13.7	515	23.98	FAILED EXPERIMENT: structural-mask record parser: no faster, more memory; reverted
-209c01f	a	run-37d9f7da7468	0.0425	22.0	476	31.79
+5892567	d	run-bbbd84e1a18c	0.1914	159.4	507	19.00
+209c01f	a	run-37d9f7da7468	0.0425	22.0	476	31.79	FAILED EXPERIMENT: one-word 32 KB endpoint table: no change; reverted
 209c01f	b	run-710cdc9d99fe	0.3179	84.5	890	18.15
 209c01f	d	run-1392371f1b98	0.2033	159.9	507	18.42
 209c01f	c	run-caa95fc37fcf	0.0361	8.3	-	-	TIMING PROBE (fails the hash on purpose): no name interning: interning and the shared bitset cost ~21 ms
-209c01f	a	run-37d9f7da7468	0.0425	22.0	476	31.79	FAILED EXPERIMENT: one-word 32 KB endpoint table: no change; reverted
 241d75d	a	run-77afde9e4f34	0.0405	23.0	475	32.29
 241d75d	b	run-7f9e3c3d6196	0.3126	83.4	890	18.35
-241d75d	c	run-a6ac5a373a1e	0.0552	12.9	542	24.83
-241d75d	d	run-059ae18d9c5b	0.1947	160.1	507	18.82
 241d75d	c	run-a6ac5a373a1e	0.0552	12.9	542	24.83	FAILED EXPERIMENT: owner-written bitset rows (no locked RMW), byte region table: 2 ms faster but more memory and lines, lower K; reverted
-9c83538	a	run-343c93875116	0.0404	22.5	491	32.31
-9c83538	b	run-ccdd0dba725c	0.3127	84.6	886	18.31
+241d75d	d	run-059ae18d9c5b	0.1947	160.1	507	18.82
 9c83538	a	run-343c93875116	0.0404	22.5	491	32.31	FAILED EXPERIMENT: two halves of each chunk parsed in lockstep: no change; reverted
 9c83538	b	run-ccdd0dba725c	0.3127	84.6	886	18.31	no bit filter in front of the term table: same speed, so the filter is removed
 9c83538	c	run-d384093302d8	0.0579	11.8	493	25.03
@@ -215,12 +198,10 @@ cef5dc1	c	run-7569b1ba0a68	0.0574	11.3	493	25.35
 cef5dc1	b	run-9fe8abd767c0	0.1883	34.8	-	-	TIMING PROBE (fails the hash on purpose): no counting sort: the sort costs ~84 ms
 cef5dc1	d	run-8ca683bdf2a9	0.2254	159.8	507	17.50
 6024f45	a	run-6966c50ce6cf	0.0416	21.9	475	32.16
-6024f45	b	run-718e56e8faac	0.2914	99.6	866	18.42
+6024f45	b	run-718e56e8faac	0.2914	99.6	866	18.42	postings collected by term range, scattered one range at a time; no term filter
 6024f45	c	run-176d29c2a1a1	0.0569	11.2	493	25.48
 6024f45	d	run-b9bacb339704	0.1953	159.7	507	18.80
-6024f45	b	run-718e56e8faac	0.2914	99.6	866	18.42	postings collected by term range, scattered one range at a time; no term filter
 4b83e56	a	run-da69a35f2baf	0.0422	22.7	475	31.71
-4b83e56	b	run-eb7d798fa4af	0.3087	95.6	871	18.03
 4b83e56	b	run-eb7d798fa4af	0.3087	95.6	871	18.03	FAILED EXPERIMENT: eight chunks per thread: slower queries over twice the chunks; reverted
 4b83e56	c	run-f5a293dc0b68	0.0576	11.2	493	25.36
 4b83e56	d	run-cdfba208e956	0.1942	159.4	507	18.86
@@ -228,12 +209,10 @@ e041e16	b	run-5fc8b691037b	0.2995	99.3	866	18.18
 e041e16	a	run-6bab828bfa12	0.0338	18.0	-	-	TIMING PROBE (fails the hash on purpose): lookups done, records independent of them: the lookup work itself is the ~10 ms
 e041e16	c	run-0fc28987b568	0.0587	11.8	493	24.87
 e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
-0ad8d98	a	run-0ab5b869a85f	0.0437	23.9	479	30.80
-0ad8d98	b	run-df8d3a09501b	0.3035	100.1	866	18.03
-0ad8d98	c	run-3f1b11477bac	0.0599	11.4	500	24.70
-0ad8d98	d	run-4954ff6dd475	0.2062	159.7	507	18.30
 0ad8d98	a	run-0ab5b869a85f	0.0437	23.9	479	30.80	FAILED EXPERIMENT: cold insert path out of line: no gain (box noisy this run); reverted
+0ad8d98	b	run-df8d3a09501b	0.3035	100.1	866	18.03
 0ad8d98	c	run-3f1b11477bac	0.0599	11.4	500	24.70	FAILED EXPERIMENT: cold claim path out of line: no gain; reverted
+0ad8d98	d	run-4954ff6dd475	0.2062	159.7	507	18.30
 4dd375f	a	run-f5731704d7d1	0.0390	22.8	475	32.97
 4dd375f	b	run-fec015e91f14	0.2915	99.8	866	18.41
 4dd375f	c	run-30ebd7689775	0.0578	11.7	493	25.11
