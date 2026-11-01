@@ -308,6 +308,7 @@ fn main() {
                         });
                         assert!(n_docs < 1 << 16, "chunk too large for 16-bit offsets");
                         let ci = postings.index(base.unwrap_or(0), n_docs);
+                        if std::hint::black_box(true) { std::hint::black_box(&ci); continue; } // TIMING PROBE
                         for (&(first, rest), result) in bools.iter().zip(&mut results) {
                             if rest.is_empty() {
                                 emit(ci.set(first), ci.base, result);
@@ -326,6 +327,8 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0);
     // A phrase can match one document at several positions; count the document once.
     let mut matches: Vec<(u32, u32)> = partial.iter().flat_map(|(_, m)| m).copied().collect();
     matches.sort_unstable();
