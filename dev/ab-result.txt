@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ad9b552)
+HEAD is now at ad9b552 EXPERIMENT Track C: separator-driven parse. Quote, comma and LF bitmasks per 64 bytes (AVX2), inside-quote mask by prefix XOR, and each record read from its five separators, with no scan per field; the quotes before each separator give a field's escapes by one subtraction. PGO profile regenerated
+$ cargo build --release -q
+### A/B track c: base 196bc70a43fa9253989877e25f411a2efefae70e vs head ad9b5525c6dc27b3f6b332c7f50f1bf0329dc864
+21 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 146.27 | 143.40 | OK |
+| head | 167.63 | 164.87 | OK |
+
+speedup base/head 0.873, 95% CI [0.860, 0.883]: **head SLOWER**
