@@ -4,9 +4,8 @@
 //! 1. Hand out 128 KB chunks of the log to the threads, each read with `pread` into
 //!    the thread's one buffer. A chunk owns the lines that start in it.
 //! 2. Each thread parses its lines into 4-byte records `endpoint << 21 | latency`,
-//!    appended to one block list per hour. Endpoints get global ids from a shared
-//!    registry the first time a thread meets them; after that a thread-local table
-//!    answers by 64-bit hash alone. Larger latencies and 5xx lines go to small side
+//!    appended to one block list per hour. Endpoints get global ids from one
+//!    lock-free table shared by all threads, by hash alone. Larger latencies and 5xx lines go to small side
 //!    lists of the hour. Timestamps are never fully parsed: only the date (cached,
 //!    since consecutive lines share it) and the two hour digits matter.
 //! 3. One task per hour, in cache: a counting sort of the hour's records by endpoint
@@ -16,13 +15,12 @@
 
 mod mmap;
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 /// Every timestamp is in the 72 hours from 2026-10-30T18:00Z (spec section 2).
@@ -42,13 +40,6 @@ struct Hour {
     blocks: Vec<Vec<u32>>,
     big: Vec<(u32, u32)>, // (endpoint, latency) for latencies of 2^21 and up
     errors: Vec<u16>,     // the endpoint of every 5xx line
-}
-
-/// Endpoint names by global id, shared by the parsing threads.
-#[derive(Default)]
-struct Registry {
-    ids: HashMap<u64, u32>,
-    names: Vec<Vec<u8>>,
 }
 
 /// Summary lines are written in hour order as hours finish, in any order.
@@ -73,7 +64,7 @@ fn main() {
 
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
     let next = AtomicUsize::new(0);
-    let registry = Mutex::new(Registry::default());
+    let registry = Registry::new();
     let parts: Vec<Vec<Hour>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
@@ -83,10 +74,11 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE: exit after the parse
-    std::process::exit(0);
 
-    let names = registry.into_inner().unwrap().names;
+    let count = registry.count.into_inner() as usize;
+    let names: Vec<Vec<u8>> = (registry.names.into_iter().take(count))
+        .map(|n| n.into_inner().unwrap())
+        .collect();
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
     let mut order: Vec<usize> = (0..names.len()).collect();
     order.sort_unstable_by(|&a, &b| names[a].cmp(&names[b]));
@@ -241,13 +233,9 @@ fn parse(
     len: usize,
     next: &AtomicUsize,
     base: i64,
-    registry: &Mutex<Registry>,
+    registry: &Registry,
 ) -> Vec<Hour> {
     let mut buf = vec![0u8; CHUNK + SLACK + 1];
-    let mut table = Endpoints {
-        slots: vec![0; 2 * MAX_ENDPOINTS],
-        registry,
-    };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
     let mut open: Vec<Vec<u32>> = vec![Vec::new(); HOURS];
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
@@ -292,7 +280,7 @@ fn parse(
             let ep_start = 29 + first_byte(word(line, 28), SPACES);
             let (ep_len, h) = endpoint(line, ep_start);
             let ep_end = ep_start + ep_len;
-            let id = table.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
+            let id = registry.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -472,56 +460,66 @@ fn mix(h: u64, w: u64) -> u64 {
     m as u64 ^ (m >> 64) as u64
 }
 
-/// Slots are `tag | id`: the id in the low bits, hash bits 11..63 above it.
+/// Slots are `tag | (id + 1)`: the id in the low bits, hash bits 11..63 above it.
 const ID_MASK: u64 = MAX_ENDPOINTS as u64 - 1;
 
-/// A thread's endpoint table, keyed by hash alone: bytes are never compared on the hot
-/// path. A slot is one word, the hash's top 53 bits above the id, so the 4,096 slots
-/// take 32 KB and stay in L1. With the 12 bits that pick the first slot, a name is
-/// identified by 61 hash bits (bit 63 is forced, so a tag is never an empty slot):
-/// two of the 1,842 names sharing them has odds of about 1e-12 per run. New names
-/// take a global id from the shared registry, which compares bytes, so a full 64-bit
-/// collision between names it sees is caught.
-struct Endpoints<'a> {
-    slots: Vec<u64>, // 0 marks an empty slot
-    registry: &'a Mutex<Registry>,
+/// Endpoint ids, in one lock-free table shared by all parsing threads and keyed by hash
+/// alone: bytes are never compared. A slot is one word, the hash's top 53 bits above
+/// `id + 1`; 0 is an empty slot, and a tag with no id is a claim in progress. The
+/// 4,096 slots take 32 KB, read by every core and written once per name (1,842
+/// times), so threads never wait on a lock. With the 12 bits that pick the first slot,
+/// a name is identified by 61 hash bits (bit 63 is forced, so a tag is never 0): two
+/// of the 1,842 names sharing them has odds of about 1e-12 per run.
+struct Registry {
+    slots: Vec<AtomicU64>,
+    names: Vec<OnceLock<Vec<u8>>>, // by id
+    count: AtomicU32,
 }
 
-impl Endpoints<'_> {
+impl Registry {
+    fn new() -> Self {
+        Registry {
+            slots: (0..2 * MAX_ENDPOINTS).map(|_| AtomicU64::new(0)).collect(),
+            names: (0..MAX_ENDPOINTS).map(|_| OnceLock::new()).collect(),
+            count: AtomicU32::new(0),
+        }
+    }
+
     #[inline]
-    fn id(&mut self, name: &[u8], h: u64) -> u32 {
+    fn id(&self, name: &[u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
         let tag = (h | 1 << 63) & !ID_MASK;
         let mut i = h as usize & mask;
         loop {
-            let slot = self.slots[i];
-            if slot & !ID_MASK == tag {
-                return (slot & ID_MASK) as u32;
+            let slot = self.slots[i].load(Acquire);
+            if slot & !ID_MASK == tag && slot != tag {
+                return (slot & ID_MASK) as u32 - 1;
             }
             if slot == 0 {
-                break;
+                if let Some(id) = self.claim(i, tag, name) {
+                    return id;
+                }
+            } else if slot == tag {
+                std::hint::spin_loop(); // another thread is adding this very name
+            } else {
+                i = (i + 1) & mask;
             }
-            i = (i + 1) & mask;
         }
-        let mut r = self.registry.lock().unwrap();
-        let id = match r.ids.get(&h) {
-            Some(&id) => {
-                assert!(
-                    r.names[id as usize] == name,
-                    "64-bit endpoint hash collision"
-                );
-                id
-            }
-            None => {
-                let id = r.names.len() as u32;
-                assert!((id as usize) < MAX_ENDPOINTS, "too many distinct endpoints");
-                r.names.push(name.to_vec());
-                r.ids.insert(h, id);
-                id
-            }
-        };
-        self.slots[i] = tag | id as u64;
-        id
+    }
+
+    /// Adds `name` in empty slot `i`, unless another thread takes the slot first. The
+    /// name is stored before the slot is published, so whoever finds its id finds it.
+    #[cold]
+    #[inline(never)]
+    fn claim(&self, i: usize, tag: u64, name: &[u8]) -> Option<u32> {
+        self.slots[i]
+            .compare_exchange(0, tag, Acquire, Relaxed)
+            .ok()?;
+        let id = self.count.fetch_add(1, Relaxed);
+        assert!((id as u64) < ID_MASK, "too many distinct endpoints");
+        self.names[id as usize].set(name.to_vec()).unwrap();
+        self.slots[i].store(tag | (id as u64 + 1), Release);
+        Some(id)
     }
 }
 

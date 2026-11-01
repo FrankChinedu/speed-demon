@@ -310,3 +310,7 @@ ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69
 851ead2	b	run-07f43f7d82d8	0.3097	100.2	866	17.85	
 851ead2	c	run-7c6b51a8a5cc	0.0412	10.6	565	29.66	name hash without the murmur3 finaliser (x86 A/B 1.021x)
 851ead2	d	run-cc36b168b6b0	0.2265	159.5	507	17.46	
+83fb9ee	b	run-e8e0616545a3	0.3045	99.9	866	18.01	
+83fb9ee	c	run-568c9acacfe9	0.0411	10.6	565	29.72	code unchanged from 851ead2 (second sample)
+83fb9ee	d	run-66cba7994fc5	0.2070	159.4	507	18.27	
+83fb9ee	a	run-8fd9a8774ea8	0.0285	19.8	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse, current code: 28.5 ms (29.9 at 7dbbf8a), so the x86 compute gains barely reach the box
