@@ -212,23 +212,22 @@ fn emit(s: Set, base: u32, out: &mut Summary) {
     ];
     match s {
         Set::List(l) => {
-            let k = l.len().min(10 - out.count.min(10) as usize);
+            let k = l.len().min(10 - out.count().min(10) as usize);
             l[..k].iter().for_each(|&d| out.add(base + d as u32));
             let rest = &l[k..];
-            out.count += rest.len() as u32;
-            out.sum += base as u64 * rest.len() as u64 + rest.iter().map(|&d| d as u64).sum::<u64>();
+            let n = rest.len() as u64;
+            out.packed += (n << 40) + base as u64 * n + rest.iter().map(|&d| d as u64).sum::<u64>();
         }
         Set::Bits(b) => {
             for (k, &w) in b.iter().enumerate() {
                 let (mut w, at) = (w, base + (k * 64) as u32);
-                while w != 0 && out.count < 10 {
+                while w != 0 && out.count() < 10 {
                     out.add(at + w.trailing_zeros());
                     w &= w - 1;
                 }
                 let ones = w.count_ones();
                 let pos: u32 = (0..6).map(|j| (w & POS[j]).count_ones() << j).sum();
-                out.count += ones;
-                out.sum += ones as u64 * at as u64 + pos as u64;
+                out.packed += ((ones as u64) << 40) + ones as u64 * at as u64 + pos as u64;
             }
         }
     }
@@ -244,9 +243,11 @@ fn main() {
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    // Twelve chunks per thread, so the last round is not left half empty; at most
-    // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 12).max(docs.len() >> 23));
+    // Eight chunks per thread: with queries evaluated per chunk and the index then
+    // dropped, smaller chunks mean smaller per-thread buffers (board: 4 per thread
+    // 79 MB, 8 per thread 60 MB, 12 per thread slower). About 2.6 MB and 2,600
+    // documents each at full scale, well inside the 16-bit offsets.
+    let chunks = split_lines(docs, (threads * 8).max(docs.len() >> 23));
 
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
@@ -643,6 +644,7 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
         let doc = line[..tab]
             .iter()
             .fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
+        assert!(doc < 1 << 20, "document ids are packed in 20 bits");
         f(doc, &line[tab + 1..eol]);
         p += eol + 1;
     }
@@ -1040,28 +1042,34 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     }
 }
 
-/// `count sum id_1 .. id_10` of the matching documents, fed in ascending order.
+/// `count sum id_1 .. id_10` of the matching documents, fed in ascending order. The
+/// count and the sum share one word, `count << 40 | sum`, so adding a document is one
+/// addition and a summary is 48 bytes (each thread keeps one per BOOL query). Ids
+/// are below 2^20 (asserted as documents are read), so every sum is below 2^39.
 #[derive(Default)]
 struct Summary {
-    count: u32,
     first: [u32; 10],
-    sum: u64,
+    packed: u64,
 }
 
 impl Summary {
     #[inline]
+    fn count(&self) -> u32 {
+        (self.packed >> 40) as u32
+    }
+
+    #[inline]
     fn add(&mut self, doc: u32) {
-        if self.count < 10 {
-            self.first[self.count as usize] = doc;
+        if self.count() < 10 {
+            self.first[self.count() as usize] = doc;
         }
-        self.count += 1;
-        self.sum += doc as u64;
+        self.packed += (1 << 40) + doc as u64;
     }
 
     /// Adds the summary of a disjoint set of documents: the ten smallest ids of the
     /// union are the ten smallest of the two first-ten lists.
     fn merge(&mut self, o: &Summary) {
-        let (a, b) = (&self.first[..self.count.min(10) as usize], &o.first[..o.count.min(10) as usize]);
+        let (a, b) = (&self.first[..self.count().min(10) as usize], &o.first[..o.count().min(10) as usize]);
         let (mut first, mut i, mut j) = ([0; 10], 0, 0);
         for f in first.iter_mut().take(a.len() + b.len()) {
             if j == b.len() || (i < a.len() && a[i] < b[j]) {
@@ -1070,14 +1078,14 @@ impl Summary {
                 (*f, j) = (b[j], j + 1);
             }
         }
-        (self.first, self.count, self.sum) = (first, self.count + o.count, self.sum + o.sum);
+        (self.first, self.packed) = (first, self.packed + o.packed);
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
-        push_num(buf, self.count as u64);
+        push_num(buf, self.count() as u64);
         buf.push(b' ');
-        push_num(buf, self.sum);
-        for &d in &self.first[..(self.count as usize).min(10)] {
+        push_num(buf, self.packed & ((1 << 40) - 1));
+        for &d in &self.first[..(self.count() as usize).min(10)] {
             buf.push(b' ');
             push_num(buf, d as u64);
         }
