@@ -238,3 +238,7 @@ e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
 4dd375f	b	run-fec015e91f14	0.2915	99.8	866	18.41	
 4dd375f	c	run-30ebd7689775	0.0578	11.7	493	25.11	
 4dd375f	d	run-43b4e1cb11a8	0.1922	160.0	507	18.94	
+01fdee3	a	run-e3e705c92504	0.0442	23.6	475	30.75	noise check: docs-only commit, code unchanged from 4dd375f
+01fdee3	b	run-f573abb0f149	0.3434	99.8	866	16.96	noise check: docs-only commit, code unchanged from 4dd375f
+01fdee3	c	run-34ab624a63be	0.0594	11.0	493	25.06	noise check: docs-only commit, code unchanged from 4dd375f
+01fdee3	d	run-176c2326db53	0.2038	159.5	507	18.41	noise check: docs-only commit, code unchanged from 4dd375f
