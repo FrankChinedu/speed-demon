@@ -175,9 +175,12 @@ impl Scratch {
             end[e] = total;
             total += count[e];
         }
+        // Every slot below `total` is written by the scatter before it is read, so the
+        // buffer only ever grows and is never cleared.
         let lat = &mut self.latencies;
-        lat.clear();
-        lat.resize(total as usize, 0);
+        if lat.len() < total as usize {
+            lat.resize(total as usize, 0);
+        }
         for p in parts {
             for block in p.blocks {
                 for r in block {
