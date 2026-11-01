@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 63c2495)
+HEAD is now at 63c2495 Track B: terms in more than 1/64 of a chunk's documents become bitmaps (was 1/16): the index is dropped after its chunk's queries, so bitmaps no longer cost memory across the run, and most query work was short list-list merges
+$ cargo build --release -q
+### A/B track b: base 0ee7820 vs head 63c2495
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1019.83 | 1012.64 | OK |
+| head | 997.03 | 994.16 | OK |
+
+speedup base/head 1.023, 95% CI [1.020, 1.026]: **head FASTER**
