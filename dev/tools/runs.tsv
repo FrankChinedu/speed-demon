@@ -441,3 +441,7 @@ f0410c0	b	run-ce1a349b295c	0.2051	80.3	-	-	TIMING PROBE (fails the hash on purpo
 1b38a46	b	run-2007d990b500	0.2668	79.4	976	19.78	unchecked indexing where in range by construction (x86 A/B 1.015x): 0.2668, a slow board sample
 1b38a46	c	run-40935e2bd1e4	0.0417	10.9	529	29.66	
 1b38a46	d	run-55f1769eecba	0.2077	128.8	541	18.85	code unchanged from 6753993
+fec02e1	a	run-e61185c58386	0.0268	21.7	522	39.57	
+fec02e1	b	run-215e302c1b8f	0.2446	73.2	976	21.00	EXPERIMENT: five chunks per thread: T 0.2446, M 73.2 (smaller per-thread buffers), K 21.00, best so far
+fec02e1	c	run-912cdb13536d	0.0404	11.1	529	29.97	
+fec02e1	d	run-8f285ada6653	0.1953	124.7	541	19.56	code unchanged from 6753993
