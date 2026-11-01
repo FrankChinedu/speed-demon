@@ -51,8 +51,9 @@ enum Op {
 }
 
 enum Query {
-    /// First BOOL term, then (operator, BOOL term) pairs applied left to right.
-    Bool(u32, Vec<(Op, u32)>),
+    /// `bool_terms[start..start + len]`: the first BOOL term (its operator unused),
+    /// then (operator, BOOL term) pairs applied left to right.
+    Bool(usize, usize),
     Phrase(usize),
 }
 
@@ -61,7 +62,11 @@ struct Plan {
     table: Table,
     n_bool: usize,
     queries: Vec<Query>,
-    phrases: Vec<Vec<u32>>,
+    /// Every BOOL query's terms, and every phrase's, in one array each (no allocation
+    /// per query); phrase p is `phrase_terms[phrase_at[p].0..phrase_at[p].1]`.
+    bool_terms: Vec<(Op, u32)>,
+    phrase_terms: Vec<u32>,
+    phrase_at: Vec<(u32, u32)>,
     /// Each phrase is checked only where its key term occurs: the phrase's term used
     /// by the fewest queries, a proxy for the rarest in the corpus (almost every
     /// phrase is built around a rare anchor). A term's keyed phrases, with the key's
@@ -254,7 +259,10 @@ fn main() {
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
         .filter_map(|q| match q {
-            Query::Bool(first, rest) => Some((*first, &rest[..])),
+            &Query::Bool(start, len) => {
+                let t = &plan.bool_terms[start..start + len];
+                Some((t[0].1, &t[1..]))
+            }
             Query::Phrase(_) => None,
         })
         .collect();
@@ -492,7 +500,7 @@ impl Postings {
 fn plan(text: &'static [u8]) -> Plan {
     // Query words go straight into the token table, keyed exactly as the tokenizer
     // will key corpus tokens (terms are already lowercase).
-    let mut terms = Terms::default();
+    let mut terms = Terms::with_capacity((text.len() / 16).next_power_of_two().max(1 << 16));
     let mut id = |w: &[u8]| {
         assert!(w.len() <= MAX_TERM, "query term longer than 32 bytes");
         terms.insert(key_at(
@@ -501,14 +509,13 @@ fn plan(text: &'static [u8]) -> Plan {
             w.len(),
         ))
     };
-    let mut raw_bool: Vec<(u32, Vec<(Op, u32)>)> = Vec::new();
-    let mut queries = Vec::new();
-    let mut phrases: Vec<Vec<u32>> = Vec::new();
+    let (mut bool_terms, mut phrase_terms) = (Vec::new(), Vec::new());
+    let (mut queries, mut phrase_at) = (Vec::new(), Vec::new());
     for line in text.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
         if let Some(rest) = line.strip_prefix(b"BOOL ") {
             let mut words = rest.split(|&b| b == b' ');
-            let first = id(words.next().unwrap());
-            let mut ops = Vec::new();
+            let start = bool_terms.len();
+            bool_terms.push((Op::And, id(words.next().unwrap())));
             while let (Some(op), Some(w)) = (words.next(), words.next()) {
                 let op = match op {
                     b"AND" => Op::And,
@@ -516,17 +523,18 @@ fn plan(text: &'static [u8]) -> Plan {
                     b"NOT" => Op::Not,
                     _ => panic!("bad operator in {}", String::from_utf8_lossy(line)),
                 };
-                ops.push((op, id(w)));
+                bool_terms.push((op, id(w)));
             }
-            raw_bool.push((first, ops));
-            queries.push(Query::Bool(0, Vec::new()));
+            queries.push(Query::Bool(start, bool_terms.len() - start));
         } else {
             let inner = line
                 .strip_prefix(b"PHRASE \"")
                 .and_then(|r| r.strip_suffix(b"\""))
                 .expect("bad query");
-            phrases.push(inner.split(|&b| b == b' ').map(&mut id).collect());
-            queries.push(Query::Phrase(phrases.len() - 1));
+            let start = phrase_terms.len() as u32;
+            phrase_terms.extend(inner.split(|&b| b == b' ').map(&mut id));
+            phrase_at.push((start, phrase_terms.len() as u32));
+            queries.push(Query::Phrase(phrase_at.len() - 1));
         }
     }
 
@@ -541,33 +549,17 @@ fn plan(text: &'static [u8]) -> Plan {
         }
         bool_index[t as usize]
     };
-    let raw_terms: Vec<u32> = raw_bool
-        .iter()
-        .flat_map(|(f, ops)| std::iter::once(*f).chain(ops.iter().map(|&(_, t)| t)))
-        .collect();
-    let mut raw_bool = raw_bool.into_iter();
-    for q in queries.iter_mut() {
-        if let Query::Bool(..) = q {
-            let (first, ops) = raw_bool.next().unwrap();
-            *q = Query::Bool(
-                dense(first),
-                ops.into_iter().map(|(op, t)| (op, dense(t))).collect(),
-            );
-        }
-    }
-
     // Query frequency of every term, then each phrase's key: its least used term.
     let mut uses = vec![0u32; n_terms];
-    for q in &queries {
-        if let Query::Phrase(p) = q {
-            phrases[*p].iter().for_each(|&t| uses[t as usize] += 1);
-        }
-    }
-    for t in raw_terms {
+    for &t in bool_terms.iter().map(|(_, t)| t).chain(&phrase_terms) {
         uses[t as usize] += 1;
     }
-    let keys: Vec<(u32, u32, u32)> = phrases
-        .iter()
+    // BOOL terms numbered in order of appearance.
+    for (_, t) in bool_terms.iter_mut() {
+        *t = dense(*t);
+    }
+    let keys: Vec<(u32, u32, u32)> = (phrase_at.iter())
+        .map(|&(a, b)| &phrase_terms[a as usize..b as usize])
         .enumerate()
         .map(|(p, terms)| {
             let at = (0..terms.len())
@@ -609,9 +601,7 @@ fn plan(text: &'static [u8]) -> Plan {
         mask: terms.mask,
         slots,
     };
-    for terms in &mut phrases {
-        terms.iter_mut().for_each(|t| *t = slot_of[*t as usize]);
-    }
+    phrase_terms.iter_mut().for_each(|t| *t = slot_of[*t as usize]);
     Plan {
         table,
         n_bool: {
@@ -619,7 +609,9 @@ fn plan(text: &'static [u8]) -> Plan {
             n_bool as usize
         },
         queries,
-        phrases,
+        bool_terms,
+        phrase_terms,
+        phrase_at,
         keyed,
         key_first,
     }
@@ -637,7 +629,8 @@ fn match_phrases(
     for &(i, lo, hi) in keys {
         let i = i as usize;
         for &(p, at) in &plan.keyed[lo as usize..hi as usize] {
-            let terms = &plan.phrases[p as usize];
+            let (a, b) = plan.phrase_at[p as usize];
+            let terms = &plan.phrase_terms[a as usize..b as usize];
             if let Some(start) = i.checked_sub(at as usize) {
                 if ids[start..].starts_with(terms) {
                     matches.push((p, doc));
