@@ -252,7 +252,7 @@ fn parse(
     registry: &Mutex<Registry>,
 ) -> Vec<Hour> {
     let mut table = Endpoints {
-        slots: vec![(0, 0); 2 * MAX_ENDPOINTS],
+        buckets: vec![[0; 8]; 512],
         registry,
     };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
@@ -390,30 +390,55 @@ fn fmix(mut h: u64) -> u64 {
     h ^ h >> 33
 }
 
-/// A thread's endpoint table, keyed by a strong 64-bit hash of the name alone: bytes
-/// are never compared on the hot path. Two of the 1,842 names sharing a hash has odds
-/// of about 1e-13 per run. New names take a global id from the shared registry, which
-/// does compare bytes, so a collision between names it sees is caught.
+/// Slots are `tag | id`: the id in the low bits, hash bits 11..63 above it.
+const ID_MASK: u64 = MAX_ENDPOINTS as u64 - 1;
+
+/// A thread's endpoint table, keyed by hash alone: bytes are never compared on the hot
+/// path. 512 buckets of eight one-word slots (32 KB). A lookup compares the whole home
+/// bucket with selects, so there is no probe loop whose length the branch predictor
+/// would have to guess; only names not yet seen, or in a full bucket (about 1% of
+/// buckets), take the cold path. A name is identified by 61 hash bits (9 pick the
+/// bucket, 52 are in the tag, bit 63 is forced so a tag is never an empty slot): two
+/// of the 1,842 names sharing them has odds of about 1e-12 per run. New names take a
+/// global id from the shared registry, which compares bytes, so a full 64-bit
+/// collision between names it sees is caught.
 struct Endpoints<'a> {
-    slots: Vec<(u64, u32)>, // (hash, id); hash 0 marks an empty slot
+    buckets: Vec<[u64; 8]>, // 0 marks an empty slot
     registry: &'a Mutex<Registry>,
 }
 
 impl Endpoints<'_> {
     #[inline]
     fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
-        let mask = self.slots.len() - 1;
-        let mut i = h as usize & mask;
-        loop {
-            let (sh, id) = self.slots[i];
-            if sh == h {
-                return id;
-            }
-            if sh == 0 {
-                break;
-            }
-            i = (i + 1) & mask;
+        let tag = (h | 1 << 63) & !ID_MASK;
+        let bucket = &self.buckets[h as usize & (self.buckets.len() - 1)];
+        let mut hit = 0;
+        for &s in bucket {
+            hit |= if s & !ID_MASK == tag { s } else { 0 };
         }
+        if hit != 0 {
+            return (hit & ID_MASK) as u32;
+        }
+        self.insert(name, h, tag)
+    }
+
+    /// The home bucket missed: look in the overflow buckets after it, then ask the
+    /// registry and store the name in the first free slot.
+    #[cold]
+    #[inline(never)]
+    fn insert(&mut self, name: &'static [u8], h: u64, tag: u64) -> u32 {
+        let mask = self.buckets.len() - 1;
+        let mut b = h as usize & mask;
+        let free = loop {
+            let bucket = &self.buckets[b];
+            if let Some(&s) = bucket.iter().find(|&&s| s & !ID_MASK == tag) {
+                return (s & ID_MASK) as u32;
+            }
+            if let Some(k) = bucket.iter().position(|&s| s == 0) {
+                break k;
+            }
+            b = (b + 1) & mask;
+        };
         let mut r = self.registry.lock().unwrap();
         let id = match r.ids.get(&h) {
             Some(&id) => {
@@ -431,7 +456,7 @@ impl Endpoints<'_> {
                 id
             }
         };
-        self.slots[i] = (h, id);
+        self.buckets[b][free] = tag | id as u64;
         id
     }
 }
