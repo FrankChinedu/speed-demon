@@ -18,7 +18,8 @@ mod mmap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
 /// A token that no query uses, or a term that is not in any BOOL query.
@@ -257,17 +258,18 @@ fn main() {
         })
         .collect();
 
-    // The single pass over the corpus. Chunks are handed out dynamically, so each
-    // thread meets its chunks in ascending order. As soon as a chunk is indexed, every
-    // BOOL query is evaluated on it while its index is still in cache, and the index
-    // is dropped: each thread keeps only its running summary of every BOOL query.
+    // The single pass over the corpus. Chunks are handed out dynamically. As soon as a
+    // chunk is indexed, every BOOL query is evaluated on it while its index is still
+    // in cache, its result added to the query's shared summary, and the index dropped.
+    // Each thread starts at a different query, so threads rarely meet on one summary.
+    let shared: Vec<Shared> = bools.iter().map(|_| Shared::default()).collect();
     let next = AtomicUsize::new(0);
-    let partial: Vec<(Vec<Summary>, Vec<(u32, u32)>)> = thread::scope(|s| {
+    let partial: Vec<Vec<(u32, u32)>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let (plan, chunks, next, bools) = (&plan, &chunks, &next, &bools);
+            .map(|t| {
+                let (plan, chunks, next, bools, shared) = (&plan, &chunks, &next, &bools, &shared);
                 s.spawn(move || {
-                    let mut results: Vec<Summary> = bools.iter().map(|_| Summary::default()).collect();
+                    let start = t * bools.len() / threads;
                     let mut matches = Vec::new();
                     let mut acc = Acc::default();
                     let mut ids = Vec::with_capacity(1024);
@@ -309,26 +311,30 @@ fn main() {
                         });
                         assert!(n_docs < 1 << 16, "chunk too large for 16-bit offsets");
                         let ci = postings.index(base.unwrap_or(0), n_docs);
-                        for (&(first, rest), result) in bools.iter().zip(&mut results) {
+                        for k in 0..bools.len() {
+                            let q = (k + start) % bools.len();
+                            let (first, rest) = bools[q];
+                            let mut result = Summary::default();
                             if rest.is_empty() {
-                                emit(ci.set(first), ci.base, result);
-                                continue;
+                                emit(ci.set(first), ci.base, &mut result);
+                            } else {
+                                acc.start(ci.set(first));
+                                for &(op, t) in rest {
+                                    acc.apply(op, ci.set(t));
+                                }
+                                acc.emit(ci.base, &mut result);
                             }
-                            acc.start(ci.set(first));
-                            for &(op, t) in rest {
-                                acc.apply(op, ci.set(t));
-                            }
-                            acc.emit(ci.base, result);
+                            shared[q].add(&result);
                         }
                     }
-                    (results, matches)
+                    matches
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     // A phrase can match one document at several positions; count the document once.
-    let mut matches: Vec<(u32, u32)> = partial.iter().flat_map(|(_, m)| m).copied().collect();
+    let mut matches: Vec<(u32, u32)> = partial.into_iter().flatten().collect();
     matches.sort_unstable();
     matches.dedup();
     let phrase_docs = |p: usize| {
@@ -351,8 +357,8 @@ fn main() {
     let mut blocks: Vec<(usize, Vec<u8>)> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (plan, next, partial, phrase_docs, nth_bool) =
-                    (&plan, &next, &partial, &phrase_docs, &nth_bool);
+                let (plan, next, shared, phrase_docs, nth_bool) =
+                    (&plan, &next, &shared, &phrase_docs, &nth_bool);
                 s.spawn(move || {
                     let mut done = Vec::new();
                     loop {
@@ -365,9 +371,7 @@ fn main() {
                             let mut result = Summary::default();
                             match plan.queries[i] {
                                 Query::Phrase(p) => phrase_docs(p).for_each(|d| result.add(d)),
-                                Query::Bool(..) => partial
-                                    .iter()
-                                    .for_each(|(r, _)| result.merge(&r[nth_bool[i]])),
+                                Query::Bool(..) => result = shared[nth_bool[i]].get(),
                             }
                             result.write(&mut buf);
                         }
@@ -1042,6 +1046,59 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     }
 }
 
+/// One BOOL query's summary, shared by all threads, which add one chunk's result at
+/// a time (chunks are disjoint). The packed count and sum take one atomic addition.
+/// The ten smallest ids so far are kept sorted (u32::MAX where unfilled) under a
+/// lock, and `tenth` mirrors the last of them: a chunk whose smallest match is not
+/// below it cannot change them, so the lock is skipped. `tenth` only decreases, so a
+/// stale read can only take the lock needlessly, never miss an update.
+struct Shared {
+    packed: AtomicU64,
+    tenth: AtomicU32,
+    first: Mutex<[u32; 10]>,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            packed: AtomicU64::new(0),
+            tenth: AtomicU32::new(u32::MAX),
+            first: Mutex::new([u32::MAX; 10]),
+        }
+    }
+}
+
+impl Shared {
+    fn add(&self, s: &Summary) {
+        let n = s.count().min(10) as usize;
+        if n == 0 {
+            return;
+        }
+        self.packed.fetch_add(s.packed, Relaxed);
+        if s.first[0] < self.tenth.load(Relaxed) {
+            let mut first = self.first.lock().unwrap();
+            let (a, b) = (*first, &s.first[..n]);
+            let (mut i, mut j) = (0, 0);
+            for f in first.iter_mut() {
+                if j == b.len() || a[i] < b[j] {
+                    (*f, i) = (a[i], i + 1);
+                } else {
+                    (*f, j) = (b[j], j + 1);
+                }
+            }
+            self.tenth.store(first[9], Relaxed);
+        }
+    }
+
+    /// The summary, once every thread has finished.
+    fn get(&self) -> Summary {
+        Summary {
+            first: *self.first.lock().unwrap(),
+            packed: self.packed.load(Relaxed),
+        }
+    }
+}
+
 /// `count sum id_1 .. id_10` of the matching documents, fed in ascending order. The
 /// count and the sum share one word, `count << 40 | sum`, so adding a document is one
 /// addition and a summary is 48 bytes (each thread keeps one per BOOL query). Ids
@@ -1064,21 +1121,6 @@ impl Summary {
             self.first[self.count() as usize] = doc;
         }
         self.packed += (1 << 40) + doc as u64;
-    }
-
-    /// Adds the summary of a disjoint set of documents: the ten smallest ids of the
-    /// union are the ten smallest of the two first-ten lists.
-    fn merge(&mut self, o: &Summary) {
-        let (a, b) = (&self.first[..self.count().min(10) as usize], &o.first[..o.count().min(10) as usize]);
-        let (mut first, mut i, mut j) = ([0; 10], 0, 0);
-        for f in first.iter_mut().take(a.len() + b.len()) {
-            if j == b.len() || (i < a.len() && a[i] < b[j]) {
-                (*f, i) = (a[i], i + 1);
-            } else {
-                (*f, j) = (b[j], j + 1);
-            }
-        }
-        (self.first, self.packed) = (first, self.packed + o.packed);
     }
 
     fn write(&self, buf: &mut Vec<u8>) {
