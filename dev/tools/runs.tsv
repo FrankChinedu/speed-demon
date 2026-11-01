@@ -342,3 +342,7 @@ dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53
 022abb8	b	run-546717a5c6d5	0.3002	99.2	866	18.16	
 022abb8	c	run-e3d43c225be2	0.0434	11.1	565	28.66	code unchanged from 851ead2
 022abb8	d	run-ccb77eed6e86	0.2039	159.6	507	18.40	
+8172e57	a	run-c54ef44cdcd1	0.0273	22.1	570	38.60	code unchanged from 022abb8 (second sample)
+8172e57	b	run-dccd8c8be24a	0.3002	99.6	866	18.15	
+8172e57	d	run-7f4365276cfb	0.2365	160.0	507	17.08	
+8172e57	c	run-4af1957f0861	0.0031	7.9	-	-	TIMING PROBE (fails the hash on purpose): exits after loading regions.csv: 3.1 ms of serial start-up
