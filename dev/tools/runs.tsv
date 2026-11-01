@@ -493,3 +493,7 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 173ed27	b	run-c766d50d2fe6	0.2627	45.1	1025	22.17	six chunks per thread, queries skipped where a required term is absent: 0.2628, M 45.1 (box slow this run? A 0.0280); resampled
 173ed27	c	run-3a08187d0e19	0.0399	10.9	529	30.31	
 173ed27	d	run-ae50acd4f64b	0.2093	127.0	541	18.83	code unchanged from 6753993
+932c26e	a	run-84c6595856ea	0.0269	21.8	522	39.52	
+932c26e	b	run-d7648d6e074f	0.2491	45.8	1025	22.69	required-term skip, second sample: 0.2491 (0.2628 before; 0.2429 without it): no gain, reverted
+932c26e	c	run-7983d03e09ff	0.0406	10.6	529	30.19	
+932c26e	d	run-c9ba1b07b34c	0.2025	127.3	541	19.13	code unchanged from 6753993
