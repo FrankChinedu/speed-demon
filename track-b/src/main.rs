@@ -273,7 +273,7 @@ fn main() {
                     let start = t * bools.len() / threads;
                     let mut matches = Vec::new();
                     let mut acc = Acc::default();
-                    let mut ids = Vec::with_capacity(1024);
+                    let (mut ids, mut infos) = (Vec::with_capacity(1024), Vec::with_capacity(1024));
                     let mut scratch = Scratch::default();
                     // The chunk's postings, `doc offset << 16 | BOOL index` (there are at
                     // most 65,536 BOOL terms), split by term range; and each term's count.
@@ -294,16 +294,15 @@ fn main() {
                             n_docs += 1;
                             ids.clear();
                             keys.clear();
-                            tokenize(text, &plan.table, &mut scratch, &mut ids);
+                            tokenize(text, &plan.table, &mut scratch, &mut ids, &mut infos);
                             // Each token's BOOL posting (once per document) and whether a
-                            // phrase is keyed on it, from its slot.
-                            for (i, &t) in ids.iter().enumerate().filter(|(_, t)| **t != NONE) {
-                                let e = plan.table.slots[t as usize];
-                                let b = (e & T_NO_BOOL) as u32;
+                            // phrase is keyed on it, from the info its lookup returned.
+                            for (i, (&t, &e)) in ids.iter().zip(&infos).enumerate() {
+                                let b = e & T_NO_BOOL as u32;
                                 if b != T_NO_BOOL as u32 {
                                     postings.add(offset, b);
                                 }
-                                if e & T_KEYED != 0 {
+                                if e & T_KEYED as u32 != 0 {
                                     let k = &plan.key_first[t as usize..];
                                     keys.push((i as u32, k[0], k[1]));
                                 }
@@ -740,20 +739,21 @@ impl Table {
         (h | 1 << 63) >> INFO_BITS << INFO_BITS
     }
 
-    /// The slot of the term with hash `h`, or NONE if it is not a query term. Most
+    /// The slot of the term with hash `h` and its `info`, or NONE and T_NO_BOOL if
+    /// it is not a query term. Most
     /// corpus tokens are query terms found at their first slot, so that test comes
     /// first.
     #[inline]
-    fn find(&self, h: u64) -> u32 {
+    fn find(&self, h: u64) -> (u32, u32) {
         let (tag, mut i) = (Table::tag(h), h as usize & self.mask);
         loop {
             // SAFETY: `i` is masked by `mask`, and the table has `mask + 1` slots.
             let e = unsafe { *self.slots.get_unchecked(i) };
             if e >> INFO_BITS << INFO_BITS == tag {
-                return i as u32;
+                return (i as u32, (e & ((1 << INFO_BITS) - 1)) as u32);
             }
             if e == 0 {
-                return NONE;
+                return (NONE, T_NO_BOOL as u32);
             }
             i = (i + 1) & self.mask;
         }
@@ -843,7 +843,8 @@ fn hash(k: &Key) -> u64 {
     (h ^ h >> 33) | 1
 }
 
-/// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order.
+/// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order,
+/// and `infos` with each one's BOOL index and keyed flag.
 ///
 /// A token is a maximal run of `[A-Za-z0-9]`. Each 64-byte block is classified into a
 /// bitmask; XOR-ing it with itself shifted by one bit sets a bit at every token
@@ -853,7 +854,13 @@ fn hash(k: &Key) -> u64 {
 /// The lookups for a whole document go in stages: hash and slot prefetch for every
 /// token, then the probes, so the misses of one stage overlap instead of each token
 /// waiting for its own.
-fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
+fn tokenize(
+    text: &[u8],
+    terms: &Table,
+    scratch: &mut Scratch,
+    slots: &mut Vec<u32>,
+    infos: &mut Vec<u32>,
+) {
     // Tokens are separated, so there are at most len / 2 + 1 of them: the buffer is
     // sized once and written by index, with no capacity check per token.
     if scratch.hashes.len() < text.len() / 2 + 1 {
@@ -900,11 +907,17 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
     if start != usize::MAX {
         token(start, text.len());
     }
+    // Each token's slot, and its info (T_NO_BOOL for a token no query uses).
     slots.clear();
-    slots.extend(scratch.hashes[..n].iter().map(|&h| match h {
-        0 => NONE,
-        h => terms.find(h),
-    }));
+    infos.clear();
+    for &h in &scratch.hashes[..n] {
+        let (slot, info) = match h {
+            0 => (NONE, T_NO_BOOL as u32),
+            h => terms.find(h),
+        };
+        slots.push(slot);
+        infos.push(info);
+    }
 }
 
 /// Per-thread buffers for `tokenize`.
