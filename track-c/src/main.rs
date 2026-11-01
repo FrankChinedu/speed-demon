@@ -346,7 +346,7 @@ fn parse(
 }
 
 /// Records per interning batch.
-const BATCH: usize = 32;
+const BATCH: usize = 64;
 
 /// Interns a batch of (country, name start, name end) and queues each pair to be
 /// marked seen. Every lookup is a likely cache miss into the shared name table, so
