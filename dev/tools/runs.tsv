@@ -362,6 +362,6 @@ bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39
 7f10e38	c	run-7a42b5487298	0.0413	10.6	515	30.06	FAILED EXPERIMENT (a5e47cc): huge pages left on with one malloc arena: no gain; reverted
 7f10e38	d	run-5d533060e3ff	0.0841	127.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the build: 84 ms (64 before the second parse), M 127.3, so the build sets the peak, ~24 MB above its arrays (B shows the same ~24 MB: 12 thread stacks on huge pages?)
 7a22f66	a	run-2a14d5f47cee	0.0271	22.6	526	39.00	
-7a22f66	b	run-0e13ef120e87	0.2787	91.9	882	19.09	
+7a22f66	b	run-0e13ef120e87	0.2787	91.9	882	19.09	256 KB worker stacks: M unchanged (91.9), so thread stacks are not the ~24 MB; T 0.2787 (dense bitset in, second sample)
 7a22f66	c	run-63d2988a3db6	0.0410	10.5	515	30.26	
-7a22f66	d	run-d981a2d08b17	0.2086	125.3	522	19.01	
+7a22f66	d	run-d981a2d08b17	0.2086	125.3	522	19.01	256 KB worker stacks: M unchanged (125.3); reverted
