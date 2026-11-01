@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 9327878)
+HEAD is now at 9327878 Track B: tokens walked boundary by boundary (each mask word XOR itself shifted by one bit marks every token start and end, visited by trailing-zero counts) instead of two bit scans per token; term lookup tests a hit first and returns the slot or NONE directly. Local A/B 0.28 -> 0.25 s; AVX2 path checked on amd64 against tiny and sample, seeds 1-3
+$ cargo build --release -q
+### A/B track b: base 216a13e vs head 9327878
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 919.50 | 915.08 | OK |
+| head | 903.35 | 885.76 | OK |
+
+speedup base/head 1.018, 95% CI [1.012, 1.025]: **head FASTER**
