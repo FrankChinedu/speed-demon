@@ -190,12 +190,16 @@ fn main() {
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     mmap::return_freed_buffers();
+    // Worker stacks of 256 KB instead of Rust's default 2 MB. With transparent huge
+    // pages on, a 2 MB stack mapping can be backed by one huge page, charged whole on
+    // first touch: up to 24 MB of peak memory for 12 threads that use a few KB each.
+    // SAFETY: no other thread exists yet, so nothing reads the environment while it
+    // changes; std reads this variable once, at the first spawn.
+    unsafe { std::env::set_var("RUST_MIN_STACK", "262144") };
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
     let graph = load_graph(mmap::map(&data.join("graph.txt")), threads);
-    std::fs::write(out.join("distances.txt"), format!("{}", graph.out.rows.len())).unwrap(); // TIMING PROBE
-    std::process::exit(0); // TIMING PROBE
     let queries: Vec<(u32, u32)> = (mmap::map(&data.join("queries.txt")).split(|&b| b == b'\n'))
         .filter(|l| !l.is_empty())
         .map(|l| {
