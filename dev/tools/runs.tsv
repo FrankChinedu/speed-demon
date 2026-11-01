@@ -497,3 +497,7 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 932c26e	b	run-d7648d6e074f	0.2491	45.8	1025	22.69	required-term skip, second sample: 0.2491 (0.2628 before; 0.2429 without it): no gain, reverted
 932c26e	c	run-7983d03e09ff	0.0406	10.6	529	30.19	
 932c26e	d	run-c9ba1b07b34c	0.2025	127.3	541	19.13	code unchanged from 6753993
+2d30f22	a	run-928e53ece57d	0.0265	22.3	522	39.62	
+2d30f22	b	run-da2cdc79becd	0.2475	47.7	1020	22.59	chunk lists and bitmaps reused per thread (no unmap per chunk): 0.2475, M 47.7: no gain, reverted
+2d30f22	c	run-04a8d92286b7	0.0453	11.1	529	28.30	
+2d30f22	d	run-389e6bcd2ffd	0.2430	127.5	541	17.46	code unchanged from 6753993
