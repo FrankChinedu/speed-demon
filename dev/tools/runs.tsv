@@ -517,3 +517,7 @@ c2b0f70	a	run-d72a587796bb	0.0265	21.9	522	39.74
 c2b0f70	b	run-95827e1ba6a8	0.2392	43.4	1003	23.42	plan stores BOOL and phrase terms in one array each, term table presized (x86 A/B 1.013x): 0.2392, M 43.4, K 23.42, best so far
 c2b0f70	c	run-994b336bb560	0.0398	10.9	529	30.36	
 c2b0f70	d	run-94f5b57c6fa8	0.2008	126.7	541	19.23	code unchanged from 6753993
+8e95f48	a	run-a3e48a1ac5ef	0.0265	21.7	522	39.77	
+8e95f48	b	run-a815d8201175	0.2396	46.2	1003	23.17	EXPERIMENT: per-thread count/sum, only the ten smallest shared: 0.2396, M 46.2: no time gain over the fully shared summary (0.2392, 43.4), so contention is not the per-chunk cost; reverted
+8e95f48	c	run-9dc107631be0	0.0408	10.7	529	30.04	
+8e95f48	d	run-060bd31f8948	0.2115	126.9	541	18.73	code unchanged from 6753993
