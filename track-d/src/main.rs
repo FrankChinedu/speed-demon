@@ -255,6 +255,8 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         });
     });
 
+    std::fs::write("/out/distances.txt", b"").ok(); // TIMING PROBE
+    std::process::exit(0); // TIMING PROBE
     // Prefix sums, bucket-major: each chunk's counts become its write cursors, so
     // chunk k's edges of bucket b land right after chunk k-1's.
     let mut starts = [vec![0; buckets + 1], vec![0; buckets + 1]];
