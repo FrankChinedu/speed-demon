@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ec9a972)
+HEAD is now at ec9a972 Track B: token hash by three folded 64x64 -> 128-bit multiplies (wyhash's mixing) instead of three multiplies and a MurmurHash3 finaliser
+$ cargo build --release -q
+### A/B track b: base 35887e4 vs head ec9a972
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V45 96-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 620.66 | 610.49 | OK |
+| head | 619.45 | 583.05 | OK |
+
+speedup base/head 1.002, 95% CI [0.979, 1.029]: **no clear difference**
