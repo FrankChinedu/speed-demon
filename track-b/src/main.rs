@@ -244,9 +244,9 @@ fn main() {
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    // Five chunks per thread, so the last round is not left half empty; at most
+    // Six chunks per thread, so the last round is not left half empty; at most
     // ~8 MB each (~8,000 documents), well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 5).max(docs.len() >> 23));
+    let chunks = split_lines(docs, (threads * 6).max(docs.len() >> 23));
 
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
