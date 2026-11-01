@@ -521,3 +521,7 @@ c2b0f70	d	run-94f5b57c6fa8	0.2008	126.7	541	19.23	code unchanged from 6753993
 8e95f48	b	run-a815d8201175	0.2396	46.2	1003	23.17	EXPERIMENT: per-thread count/sum, only the ten smallest shared: 0.2396, M 46.2: no time gain over the fully shared summary (0.2392, 43.4), so contention is not the per-chunk cost; reverted
 8e95f48	c	run-9dc107631be0	0.0408	10.7	529	30.04	
 8e95f48	d	run-060bd31f8948	0.2115	126.9	541	18.73	code unchanged from 6753993
+4e89bb7	a	run-057cc389576f	0.0277	21.1	522	39.17	
+4e89bb7	b	run-64d77ba164c5	0.2725	44.0	965	22.07	39 lines fewer (class table, galloping; x86 A/B 0.999): S 1003 -> 965, T 0.2725 (a slow sample? resampled)
+4e89bb7	c	run-a37207afe626	0.0404	10.6	529	30.27	
+4e89bb7	d	run-8d693647f08a	0.2025	122.5	541	19.28	code unchanged from 6753993
