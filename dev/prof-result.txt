@@ -1,0 +1,7 @@
+docs=250000 docs_bytes=253827587 queries=50000 queries_bytes=1763534 distinct_tokens=609833 seconds=99.9
+info: syncing channel updates for 1.99.1-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 5 components
+warn: the missing active toolchain `1.99.1-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
