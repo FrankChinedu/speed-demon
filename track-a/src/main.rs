@@ -83,8 +83,6 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE: exit after the parse
-    std::process::exit(0);
 
     let names = registry.into_inner().unwrap().names;
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
@@ -122,7 +120,7 @@ fn main() {
                     while w.next < HOURS
                         && let Some(lines) = w.done[w.next].take()
                     {
-                        w.file.write_all(&lines).expect("write summary.txt");
+                        std::hint::black_box(&lines); // TIMING PROBE: formatted, not written
                         w.next += 1;
                     }
                 }
