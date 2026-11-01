@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 72f6afb)
+HEAD is now at 72f6afb Track B: 39 lines fewer: the 256-byte class table replaced by is_ascii_alphanumeric (the same set) in the scalar and tail masks, and no galloping in list AND and NOT (a term in more than 1/64 of a chunk is a bitmap, so lists are short)
+$ cargo build --release -q
+### A/B track b: base 3c1038c vs head 72f6afb
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 904.73 | 894.39 | OK |
+| head | 906.06 | 894.41 | OK |
+
+speedup base/head 0.999, 95% CI [0.990, 1.008]: **no clear difference**
