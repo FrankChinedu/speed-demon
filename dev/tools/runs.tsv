@@ -314,3 +314,7 @@ ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69
 83fb9ee	c	run-568c9acacfe9	0.0411	10.6	565	29.72	code unchanged from 851ead2 (second sample)
 83fb9ee	d	run-66cba7994fc5	0.2070	159.4	507	18.27	
 83fb9ee	a	run-8fd9a8774ea8	0.0285	19.8	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse, current code: 28.5 ms (29.9 at 7dbbf8a), so the x86 compute gains barely reach the box
+64ac480	a	run-3304286ef79e	0.0338	23.0	505	35.00	one lock-free endpoint table shared by all threads instead of a registry lock per first sighting per thread: 0.0338 (contention the 2-CPU A/B runner cannot show)
+64ac480	b	run-b02c22976621	0.3393	99.9	866	17.06	
+64ac480	c	run-95ae19619dee	0.0413	10.9	565	29.49	code unchanged from 851ead2 (third sample)
+64ac480	d	run-f46403e7d1aa	0.2097	159.5	507	18.15	
