@@ -16,12 +16,10 @@
 mod mmap;
 
 use std::cell::Cell;
-use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
-use std::thread;
+use std::thread::{self, available_parallelism};
 
 /// One step of the name hash per 8-byte word: the folded multiply of foldhash and
 /// wyhash. The halves of the full 128-bit product are xored, so every input bit
@@ -83,16 +81,16 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")));
     let records = mmap::map(&data.join("records.csv"));
-    let threads = thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(12);
+    let threads = available_parallelism().map_or(1, |n| n.get().min(12));
     let groups = codes.len() + 1; // the last group is _UNMATCHED
 
     let names = Names::new();
     let bits = zeroed_atomics(groups * MAX_IDS / 64);
     let overflow = Mutex::new(Vec::new());
     let locks: Vec<Mutex<()>> = (0..SHARDS).map(|_| Mutex::new(())).collect();
-    let seen = Seen {
+    let shared = Shared {
+        region: &region,
+        names: &names,
         bits: &bits,
         locks: &locks,
         // Shards of a power of two of countries, so a pair finds its shard by a shift.
@@ -105,16 +103,16 @@ fn main() {
     let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (region, names, seen, chunks, next) = (&region, &names, &seen, &chunks, &next);
+                let (shared, chunks, next) = (&shared, &chunks, &next);
                 s.spawn(move || {
                     let mut aggs = vec![Agg::EMPTY; groups];
                     let mut queues = vec![Vec::with_capacity(QUEUE); SHARDS];
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, region, &mut aggs, names, seen, &mut queues);
+                        parse(chunk, first, shared, &mut aggs, &mut queues);
                     }
                     for (s, queue) in queues.iter_mut().enumerate() {
-                        seen.apply(s, queue);
+                        shared.apply(s, queue);
                     }
                     aggs
                 })
@@ -131,9 +129,8 @@ fn main() {
     let mut overflow = overflow.into_inner().unwrap();
     overflow.sort_unstable();
     overflow.dedup();
-    let words = (names.next_id.load(Relaxed) as usize)
-        .min(MAX_IDS)
-        .div_ceil(64);
+    let ids = names.next_id.load(Relaxed) as usize;
+    let words = ids.min(MAX_IDS).div_ceil(64);
     let distinct = |g: usize| {
         let set: u32 = bits[g * MAX_IDS / 64..][..words]
             .iter()
@@ -153,34 +150,19 @@ fn main() {
         if a.count == 0 {
             continue;
         }
-        buf.extend_from_slice(if g < codes.len() {
-            codes[g]
-        } else {
-            b"_UNMATCHED"
-        });
-        let distinct = distinct(g);
-        for (v, money) in [
-            (a.count as i64, false),
-            (a.id_sum as i64, false),
-            (a.amount_sum, true),
-            (a.amount_min, true),
-            (a.amount_max, true),
-            (distinct as i64, false),
-            (a.name_bytes as i64, false),
-            (a.note_bytes as i64, false),
-        ] {
-            buf.push(b' ');
-            if money {
-                push_cents(&mut buf, v);
-            } else {
-                push_num(&mut buf, v as u64);
-            }
+        buf.extend_from_slice(codes.get(g).copied().unwrap_or(b"_UNMATCHED"));
+        for v in [a.count, a.id_sum] {
+            push_num(&mut buf, v);
+        }
+        for v in [a.amount_sum, a.amount_min, a.amount_max] {
+            push_cents(&mut buf, v);
+        }
+        for v in [distinct(g) as u64, a.name_bytes, a.note_bytes] {
+            push_num(&mut buf, v);
         }
         buf.push(b'\n');
     }
-    File::create(out.join("aggregates.txt"))
-        .and_then(|mut f| f.write_all(&buf))
-        .expect("write aggregates.txt");
+    std::fs::write(out.join("aggregates.txt"), &buf).expect("write aggregates.txt");
 }
 
 /// Region id -> country index. One byte per id, so the table is 1 MB; a second byte
@@ -214,10 +196,7 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Regions) {
         lo: vec![0xFF; n],
         hi: Vec::new(),
     };
-    let mut p = text
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(text.len(), |i| i + 1);
+    let mut p = after_lf(text, 0);
     while p + 4 < text.len() {
         let (id, comma) = digits(text, p);
         let code = &text[comma + 1..comma + 4];
@@ -226,11 +205,7 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Regions) {
             if codes.len() == 0xFF {
                 // Index 255 would read as "no region": widen. Ids without a region
                 // become 0xFFFF, the others keep a zero high byte.
-                region.hi = region
-                    .lo
-                    .iter()
-                    .map(|&l| if l == 0xFF { 0xFF } else { 0 })
-                    .collect();
+                region.hi = region.lo.iter().map(|&l| l / 0xFF * 0xFF).collect();
             }
             by_code[key] = codes.len() as u16;
             codes.push(code);
@@ -272,6 +247,14 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
     bounds.windows(2).map(|w| &data[w[0]..w[1]]).collect()
 }
 
+/// The position just after the first LF at or after `p` (or the end).
+fn after_lf(c: &[u8], p: usize) -> usize {
+    c[p..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(c.len(), |i| p + i + 1)
+}
+
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
 /// Where each (country, name id) pair is recorded: one bit per pair, shared by all
 /// threads, so its memory does not grow with the number of threads.
@@ -281,7 +264,9 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 /// plain loads and stores: no locked instruction per record, and no bitset line
 /// moving between cores per record. A queue touches only its shard's rows, which
 /// stay in cache while it is applied.
-struct Seen<'a> {
+struct Shared<'a> {
+    region: &'a Regions,
+    names: &'a Names,
     bits: &'a [AtomicU64],
     locks: &'a [Mutex<()>],
     shard_shift: u32, // a country's shard is its index shifted right by this
@@ -292,7 +277,7 @@ struct Seen<'a> {
 const SHARDS: usize = 16;
 const QUEUE: usize = 256;
 
-impl Seen<'_> {
+impl Shared<'_> {
     /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,
     /// and there are at most 26^3 + 1 < 2^15 countries.
     #[inline]
@@ -322,25 +307,14 @@ impl Seen<'_> {
     }
 }
 
-fn parse(
-    c: &[u8],
-    first: bool,
-    region: &Regions,
-    aggs: &mut [Agg],
-    names: &Names,
-    seen: &Seen,
-    queues: &mut [Vec<u32>],
-) {
+fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut [Vec<u32>]) {
     let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
     let mut p = 0;
     if first {
         // The header is the first record: skip it, with the file's leading BOM.
-        p = c
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(c.len(), |i| i + 1);
+        p = after_lf(c, 0);
     }
     while p < c.len() {
         // Every byte but a BOM's is ASCII (spec 2.2), so 0xEF at a record start is one.
@@ -352,14 +326,13 @@ fn parse(
         let note = field(c, name.end + 1);
         let (region_id, next) = digits(c, note.end + 1);
         let (cents, next) = amount(c, next + 1);
-        p = next
-            + match c.get(next) {
-                Some(b'\r') => 2,
-                Some(_) => 1,
-                None => 0,
-            };
+        // Past the LF or CRLF (or past the end, if the last record has no terminator).
+        p = next + 1 + (c.get(next) == Some(&b'\r')) as usize;
 
-        let g = region.get(region_id as usize).unwrap_or(unmatched as usize);
+        let g = shared
+            .region
+            .get(region_id as usize)
+            .unwrap_or(unmatched as usize);
         let a = &mut aggs[g];
         a.count += 1;
         a.id_sum += id;
@@ -372,11 +345,11 @@ fn parse(
         batch[n] = (g, name.start, name.end_content);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, names, seen, queues);
+            intern(c, &batch, shared, queues);
             n = 0;
         }
     }
-    intern(c, &batch[..n], names, seen, queues);
+    intern(c, &batch[..n], shared, queues);
 }
 
 /// Records per interning batch.
@@ -386,20 +359,14 @@ const BATCH: usize = 32;
 /// marked seen. Every lookup is a likely cache miss into the shared name table, so
 /// they go in two passes: hash and prefetch every slot, then resolve the ids. The
 /// misses of one pass overlap instead of each record waiting for its own.
-fn intern(
-    c: &[u8],
-    batch: &[(usize, usize, usize)],
-    names: &Names,
-    seen: &Seen,
-    queues: &mut [Vec<u32>],
-) {
+fn intern(c: &[u8], batch: &[(usize, usize, usize)], shared: &Shared, queues: &mut [Vec<u32>]) {
     let mut hashes = [0u64; BATCH];
     for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
         *h = Names::hash(c, start, end - start);
-        names.prefetch_slot(*h);
+        shared.names.prefetch_slot(*h);
     }
     for (&h, &(g, ..)) in hashes.iter().zip(batch) {
-        seen.insert(queues, g, names.id(h));
+        shared.insert(queues, g, shared.names.id(h));
     }
 }
 
@@ -515,11 +482,7 @@ fn name_word(c: &[u8], start: usize, len: usize, k: usize) -> u64 {
             u64::from_le_bytes(w)
         }
     };
-    if keep == 8 {
-        w
-    } else {
-        w & ((1u64 << (keep * 8)) - 1)
-    }
+    w & u64::MAX >> (64 - 8 * keep) // keep is 1..=8
 }
 
 /// `n` zeroed atomics from a zeroed allocation, so pages that are never written are
@@ -605,10 +568,7 @@ fn find(c: &[u8], mut p: usize, byte: u8) -> usize {
         }
         p += 8;
     }
-    p + c[p..]
-        .iter()
-        .position(|&b| b == byte)
-        .expect("field terminator")
+    p + c[p..].iter().position(|&b| b == byte).unwrap()
 }
 
 /// An unsigned decimal at `p`, ended by `,` or `.`; returns it and the position of
@@ -622,9 +582,8 @@ fn digits(c: &[u8], mut p: usize) -> (u64, usize) {
     if let Some(w) = c.get(p..p + 8) {
         let w = u64::from_le_bytes(w.try_into().unwrap());
         let zero = |x: u64| x.wrapping_sub(ONES) & !x & (ONES << 7);
-        let n = (zero(w ^ ONES * b',' as u64) | zero(w ^ ONES * b'.' as u64)).trailing_zeros()
-            as usize
-            / 8;
+        let ends = zero(w ^ ONES * b',' as u64) | zero(w ^ ONES * b'.' as u64);
+        let n = ends.trailing_zeros() as usize / 8;
         if (1..8).contains(&n) {
             let v = (w << (8 * (8 - n))) & 0x0f0f_0f0f_0f0f_0f0f;
             let v = v.wrapping_mul(10 * (1 << 8) + 1) >> 8 & 0x00ff_00ff_00ff_00ff;
@@ -649,28 +608,23 @@ fn amount(c: &[u8], p: usize) -> (i64, usize) {
     (if negative { -cents } else { cents }, dot + 3)
 }
 
-/// Integer cents as `-?D+.DD`, never `-0.00`.
+/// A space, then integer cents as `-?D+.DD`, never `-0.00`.
 fn push_cents(out: &mut Vec<u8>, cents: i64) {
-    if cents < 0 {
-        out.push(b'-');
-    }
-    let abs = cents.unsigned_abs();
+    let (at, abs) = (out.len(), cents.unsigned_abs());
     push_num(out, abs / 100);
-    out.push(b'.');
-    out.push(b'0' + (abs % 100 / 10) as u8);
-    out.push(b'0' + (abs % 10) as u8);
+    if cents < 0 {
+        out.insert(at + 1, b'-'); // after the space
+    }
+    out.extend_from_slice(&[b'.', b'0' + (abs % 100 / 10) as u8, b'0' + (abs % 10) as u8]);
 }
 
+/// A space, then `v` in decimal.
 fn push_num(out: &mut Vec<u8>, mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
+    let mut buf = [b' '; 21];
+    let digits = v.checked_ilog10().unwrap_or(0) as usize + 1;
+    for k in (1..=digits).rev() {
+        buf[k] = b'0' + (v % 10) as u8;
         v /= 10;
-        if v == 0 {
-            break;
-        }
     }
-    out.extend_from_slice(&buf[i..]);
+    out.extend_from_slice(&buf[..=digits]);
 }
