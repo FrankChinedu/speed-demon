@@ -536,3 +536,11 @@ c2b0f70	d	run-94f5b57c6fa8	0.2008	126.7	541	19.23	code unchanged from 6753993
 173756d	b	run-b425961f6065	0.2401	43.3	965	23.51	
 173756d	c	run-db1e6724f23b	0.0436	12.3	533	28.28	FAILED EXPERIMENT: name table 1.5 MB and 13 KB bitset rows: T and M both worse; reverted
 173756d	d	run-0951d7e46f2f	0.2047	126.8	541	19.05	
+91f5117	a	run-6eb2cb9f6490	0.0265	22.1	522	39.65	
+91f5117	b	run-cf1326fd6df0	0.2417	43.3	965	23.43	
+91f5117	c	run-da08a9172aa1	0.0456	10.2	529	28.70	code unchanged from 196bc70
+91f5117	d	run-529bf12654ae	0.2252	125.1	541	18.20	
+e9612a4	a	run-bcf17f38d75a	0.0272	21.6	522	39.32	FAILED TUNING: record blocks of 256: M 21.6 (no drop), T within noise; reverted
+e9612a4	b	run-bb3790146ce8	0.2453	43.8	965	23.26	
+e9612a4	c	run-34e870c0c06b	0.0399	11.1	529	30.20	code unchanged from 196bc70
+e9612a4	d	run-b04dc020e470	0.2158	129.3	541	18.48	

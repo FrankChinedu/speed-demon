@@ -31,9 +31,8 @@ const BASE: i64 = days_from_civil(2026, 10, 30) * 24 + 18;
 const LAT_BITS: u32 = 21;
 const LAT_MASK: u32 = (1 << LAT_BITS) - 1;
 const MAX_ENDPOINTS: usize = 1 << (32 - LAT_BITS);
-/// Records are claimed from their hour's mapping in blocks of 256 (1 KB): a thread's
-/// partly filled block per hour is memory the run holds until the end of the parse.
-const BLOCK: usize = 1 << 8;
+/// Records are claimed from their hour's mapping in blocks of 1,024 (one 4 KB page).
+const BLOCK: usize = 1 << 9;
 
 /// One hour's records from every thread, in one mapping reserved at the start. A
 /// thread claims a block of BLOCK records with one atomic add and fills it alone.
