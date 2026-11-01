@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 23322c6)
+HEAD is now at 23322c6 Track B: a chunk's index is built and reset over the BOOL terms it touched only (a list of terms recorded at their first posting), through one per-thread position array (a list's end, which the scatter reaches from its start, or a bitmap's place); no per-chunk offset, slot and cursor tables over all 53,000 terms and no dense-term search. At six chunks per thread those per-term tables were 72 x 640 KB of fills and 72 x 53,000 iterations
+$ cargo build --release -q
+### A/B track b: base 23af08c vs head 23322c6
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 884.10 | 869.14 | OK |
+| head | 893.62 | 879.31 | OK |
+
+speedup base/head 0.989, 95% CI [0.975, 1.015]: **no clear difference**
