@@ -1,18 +1,17 @@
 //! Track B: Index. Answer 50,000 BOOL and PHRASE queries over a 250,000-document corpus.
 //!
 //! The queries are known before the corpus is read, so only their terms are indexed:
-//! 1. Parse the queries and give every distinct term an id.
+//! 1. Parse the queries and give every distinct term a slot in a compact hash table.
 //! 2. One pass over the corpus, in chunks of consecutive documents. Each document is
-//!    tokenized into term ids (tokens no query uses become NONE). Phrases are matched
-//!    right there: a phrase is looked up by its first two terms at every adjacent
-//!    pair, then checked in full, so no positions are ever stored. Each document's
-//!    distinct BOOL terms are recorded, and a counting sort turns them into the
-//!    chunk's own posting lists, already sorted because documents arrive in order.
-//!    A chunk holds about 10,000 documents, so lists store 16-bit offsets from the
-//!    chunk's first document: half the memory of u32 ids.
-//! 3. Chunks cover disjoint, ascending document ranges, so a BOOL query's answer is
-//!    the per-chunk answers concatenated in chunk order. Queries run in parallel,
-//!    each strictly left to right on sorted lists, chunk by chunk.
+//!    tokenized into term slots (tokens no query uses become NONE). Phrases are
+//!    matched right there, each only where its least-used term occurs, so no
+//!    positions are ever stored. Each document's distinct BOOL terms become postings,
+//!    scattered at the end of the chunk into 16-bit offsets from the chunk's first
+//!    document, or bitmaps for terms in more than 1/64 of its documents.
+//! 3. As soon as a chunk is indexed, every BOOL query is evaluated on it, strictly
+//!    left to right, while the index is in cache; then the index is dropped. Each
+//!    thread keeps a running summary of every BOOL query, and the threads' summaries
+//!    are merged per query at the end.
 
 mod mmap;
 
@@ -835,29 +834,43 @@ fn hash(k: &Key) -> u64 {
 
 /// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order.
 ///
-/// A token is a maximal run of `[A-Za-z0-9]`. First every byte is classified into a
-/// bitmask (64 bytes per word). XOR-ing each word with itself shifted by one bit then
-/// sets a bit at every token boundary, starts and ends alternating, so tokens are
-/// walked boundary by boundary with trailing-zero counts and no per-byte branch.
+/// A token is a maximal run of `[A-Za-z0-9]`. Each 64-byte block is classified into a
+/// bitmask; XOR-ing it with itself shifted by one bit sets a bit at every token
+/// boundary, starts and ends alternating, so tokens are walked boundary by boundary
+/// with trailing-zero counts and no per-byte branch.
 ///
-/// The term table does not fit in L2, so the lookups for a whole document go in
-/// stages: hash and slot prefetch for every token, then the probes. The misses of
-/// one stage overlap instead of each token waiting for its own.
+/// The lookups for a whole document go in stages: hash and slot prefetch for every
+/// token, then the probes, so the misses of one stage overlap instead of each token
+/// waiting for its own.
 fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
-    token_mask(text, &mut scratch.mask);
-    scratch.hashes.clear();
+    // Tokens are separated, so there are at most len / 2 + 1 of them: the buffer is
+    // sized once and written by index, with no capacity check per token.
+    if scratch.hashes.len() < text.len() / 2 + 1 {
+        scratch.hashes.resize(text.len() / 2 + 1, 0);
+    }
+    let (hashes, mut n) = (&mut scratch.hashes[..], 0);
     let mut token = |start: usize, end: usize| {
         let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
             h = hash(&key_at(text, start, end - start));
             prefetch(&terms.slots[h as usize & terms.mask]);
         }
-        scratch.hashes.push(h);
+        hashes[n] = h;
+        n += 1;
     };
-    // `carry` is the last bit of the previous word; `start` is where the open token
-    // began, or usize::MAX between tokens.
+    // Each block's mask is used as soon as it is made. `carry` is the last bit of the
+    // previous word; `start` is where the open token began, or usize::MAX between
+    // tokens.
+    let blocks = text.chunks_exact(64);
+    let tail = blocks.remainder();
+    let tail = (!tail.is_empty()).then(|| {
+        (tail.iter())
+            .enumerate()
+            .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i)
+    });
+    let masks = blocks.map(|b| block_mask(b.try_into().unwrap())).chain(tail);
     let (mut carry, mut start) = (0, usize::MAX);
-    for (w, &m) in scratch.mask.iter().enumerate() {
+    for (w, m) in masks.enumerate() {
         let mut edges = m ^ (m << 1 | carry);
         carry = m >> 63;
         while edges != 0 {
@@ -875,7 +888,7 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
         token(start, text.len());
     }
     slots.clear();
-    slots.extend(scratch.hashes.iter().map(|&h| match h {
+    slots.extend(scratch.hashes[..n].iter().map(|&h| match h {
         0 => NONE,
         h => terms.find(h),
     }));
@@ -884,7 +897,6 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
 /// Per-thread buffers for `tokenize`.
 #[derive(Default)]
 struct Scratch {
-    mask: Vec<u64>,
     hashes: Vec<u64>,
 }
 
@@ -920,23 +932,6 @@ fn key_at(text: &[u8], start: usize, len: usize) -> Key {
         let keep = u64::from_le_bytes(KEEP[32 - len + 8 * w..][..8].try_into().unwrap());
         (word | 0x2020_2020_2020_2020) & keep
     })
-}
-
-/// One bit per byte of `text`, set for the token bytes `[A-Za-z0-9]`.
-fn token_mask(text: &[u8], mask: &mut Vec<u64>) {
-    mask.clear();
-    let mut blocks = text.chunks_exact(64);
-    for block in &mut blocks {
-        mask.push(block_mask(block.try_into().unwrap()));
-    }
-    let tail = blocks.remainder();
-    if !tail.is_empty() {
-        mask.push(
-            tail.iter()
-                .enumerate()
-                .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i),
-        );
-    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
