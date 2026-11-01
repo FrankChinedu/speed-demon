@@ -1,7 +1,8 @@
 //! Track A: Ingest. For every (UTC hour, endpoint): count, nearest-rank p50/p95/p99,
 //! 5xx count and floor parts-per-million.
 //!
-//! 1. mmap the log and hand out 2 MB chunks of whole lines to the threads.
+//! 1. Hand out 128 KB chunks of the log to the threads, each read with `pread` into
+//!    the thread's one buffer. A chunk owns the lines that start in it.
 //! 2. Each thread parses its lines into 4-byte records `endpoint << 21 | latency`,
 //!    appended to one block list per hour. Endpoints get global ids from a shared
 //!    registry the first time a thread meets them; after that a thread-local table
@@ -18,6 +19,7 @@ mod mmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -46,7 +48,7 @@ struct Hour {
 #[derive(Default)]
 struct Registry {
     ids: HashMap<u64, u32>,
-    names: Vec<&'static [u8]>,
+    names: Vec<Vec<u8>>,
 }
 
 /// Summary lines are written in hour order as hours finish, in any order.
@@ -61,7 +63,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
-    let input = mmap::map(&data.join("requests.log"));
+    let input = File::open(data.join("requests.log")).expect("open requests.log");
+    let len = input.metadata().expect("stat requests.log").len() as usize;
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
@@ -69,20 +72,13 @@ fn main() {
     let base = days_from_civil(2026, 10, 30) * 24 + 18;
 
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
-    let chunks = split_lines(input, (input.len() >> 21).max(threads));
     let next = AtomicUsize::new(0);
     let registry = Mutex::new(Registry::default());
     let parts: Vec<Vec<Hour>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (chunks, next, registry) = (&chunks, &next, &registry);
-                s.spawn(move || {
-                    parse(
-                        || chunks.get(next.fetch_add(1, Relaxed)).copied(),
-                        base,
-                        registry,
-                    )
-                })
+                let (input, next, registry) = (&input, &next, &registry);
+                s.spawn(move || parse(input, len, next, base, registry))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -91,7 +87,7 @@ fn main() {
     let names = registry.into_inner().unwrap().names;
     // Endpoint ids in bytewise name order, which is exactly the spec's order.
     let mut order: Vec<usize> = (0..names.len()).collect();
-    order.sort_unstable_by_key(|&e| names[e]);
+    order.sort_unstable_by(|&a, &b| names[a].cmp(&names[b]));
 
     let mut by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
     for part in parts {
@@ -156,7 +152,7 @@ impl Scratch {
         &mut self,
         parts: Vec<Hour>,
         prefix: [u8; 21],
-        names: &[&[u8]],
+        names: &[Vec<u8>],
         order: &[usize],
     ) -> Vec<u8> {
         let (count, errors, end) = (&mut self.count, &mut self.errors, &mut self.end);
@@ -206,7 +202,7 @@ impl Scratch {
             let hi = end[e] as usize;
             let [p50, p95, p99] = percentiles(&mut lat[hi - n as usize..hi]);
             out.extend_from_slice(&prefix);
-            out.extend_from_slice(names[e]);
+            out.extend_from_slice(&names[e]);
             let errs = errors[e] as u64;
             for v in [
                 n as u64,
@@ -225,32 +221,27 @@ impl Scratch {
     }
 }
 
-/// Splits `data` into `n` chunks that each end just after a newline.
-fn split_lines(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
-    let mut chunks = Vec::with_capacity(n);
-    let mut start = 0;
-    for k in 1..=n {
-        let mut end = data.len();
-        if k < n {
-            let guess = (data.len() * k / n).max(start);
-            end = data[guess..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(data.len(), |p| guess + p + 1);
-        }
-        chunks.push(&data[start..end]);
-        start = end;
-    }
-    chunks
-}
+/// Bytes of the file per chunk: a chunk owns the lines that start in it. Small enough
+/// that a thread's buffer stays in its core's L2 between the read and the parse.
+const CHUNK: usize = 1 << 17;
+/// Read past a chunk's end, so its last line is whole: longer than any line, which is
+/// at most 27 + 7 + 125 + 3 + 10 bytes plus five separators.
+const SLACK: usize = 256;
 
 /// Parses whole lines of the grammar in the spec:
 /// `2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177`
+///
+/// The input is read with `pread` into one reused buffer per thread rather than
+/// mapped: a mapping costs a page-table entry per 4 KB page to set up, and to tear
+/// down serially when the process exits.
 fn parse(
-    mut next_chunk: impl FnMut() -> Option<&'static [u8]>,
+    input: &File,
+    len: usize,
+    next: &AtomicUsize,
     base: i64,
     registry: &Mutex<Registry>,
 ) -> Vec<Hour> {
+    let mut buf = vec![0u8; CHUNK + SLACK + 1];
     let mut table = Endpoints {
         slots: vec![(0, 0); 2 * MAX_ENDPOINTS],
         registry,
@@ -258,9 +249,28 @@ fn parse(
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
     let mut open: Vec<Vec<u32>> = vec![Vec::new(); HOURS];
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
-    while let Some(chunk) = next_chunk() {
-        let mut i = 0;
-        while i < chunk.len() {
+    loop {
+        let start = next.fetch_add(1, Relaxed) * CHUNK;
+        if start >= len {
+            break;
+        }
+        // Also read the byte before the chunk: the first line starts after its first LF.
+        let from = start.saturating_sub(1);
+        let chunk = &mut buf[..(CHUNK + SLACK + 1).min(len - from)];
+        input
+            .read_exact_at(chunk, from as u64)
+            .expect("read requests.log");
+        let chunk = &*chunk;
+        let mut i = if start == 0 {
+            0
+        } else {
+            chunk
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(chunk.len(), |p| p + 1)
+        };
+        let own = start + CHUNK - from; // lines starting before this are ours
+        while i < own.min(chunk.len()) {
             let line = &chunk[i..];
             // Lines arrive in time-ordered shards, so the date rarely changes between lines.
             let d = (word(line, 0), u16::from_le_bytes([line[8], line[9]]));
@@ -401,7 +411,7 @@ struct Endpoints<'a> {
 
 impl Endpoints<'_> {
     #[inline]
-    fn id(&mut self, name: &'static [u8], h: u64) -> u32 {
+    fn id(&mut self, name: &[u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
         let mut i = h as usize & mask;
         loop {
@@ -426,7 +436,7 @@ impl Endpoints<'_> {
             None => {
                 let id = r.names.len() as u32;
                 assert!((id as usize) < MAX_ENDPOINTS, "too many distinct endpoints");
-                r.names.push(name);
+                r.names.push(name.to_vec());
                 r.ids.insert(h, id);
                 id
             }
