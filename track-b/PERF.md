@@ -15,7 +15,7 @@ Before the first push, steps were measured locally with `tools/sd.py bench` (Doc
 ## Notes
 
 - 21.1M (term, doc) postings for 53,444 BOOL terms. 369 terms with df > N/32 hold half of them.
-- Box timing probes (Nov 1): tokenizing alone is ~148 ms of a ~284 ms run (154 ms before the boundary walk, 168 ms with the 8 MB term table); postings, phrases, the per-chunk scatter and the queries were the other ~136 ms.
+- Box timing probes (Nov 1): the plan is 23 ms (18 of it parsing and filling the term table); tokenizing alone ends at 141 ms of a ~244 ms run, and evaluating the queries per chunk costs ~35-50 ms. Earlier, tokenizing alone was ~148 ms of a ~284 ms run (154 ms before the boundary walk, 168 ms with the 8 MB term table); postings, phrases, the per-chunk scatter and the queries were the other ~136 ms.
 - Memory on the box carries ~24 MB more than the arrays explain (B's tokenize-only probe 31.6 MB against ~6 MB of data; D shows the same). It is not thread stacks (256 KB stacks changed nothing) and not malloc arenas (one arena saved 3.7 MB).
 - Tokenization is byte-exact ASCII: `A-Z` lowercased, runs of `a-z0-9`, every other byte (including all UTF-8 bytes) separates.
 
@@ -41,6 +41,12 @@ From Nov 1 afternoon, board noise on B (the same code measured 0.279 and 0.323 s
 | 8c7f960 | A per-thread direct-mapped cache of recent term lookups (2,048 entries, 32 KB) | 0.792 (0.781-0.799) | no |
 | 0cde2f9 | Unchecked indexing where the index is in range by construction (masked table probe, per-document hash buffer, postings entry), each with its SAFETY argument | 1.015 (1.009-1.020) | yes |
 | ccefbf8 | Skip the lookups of AND and NOT terms once a query's running result is an empty list | 0.999 (0.977-1.010) | no |
+| ad4033a | The term lookup returns each token's BOOL index and keyed flag, so the postings loop does not reload the table entry | 1.007 (0.993-1.012) | no |
+| 40f4c2b | First occurrences in a document by a 6.7 KB bitset of BOOL terms, chunk counts by a pass over the posting groups | 0.967 (0.962-0.975) | no |
+| 23322c6 | Chunk index built and reset over the terms the chunk touched only (no per-chunk tables over all 53,000 terms) | 0.989 (0.975-1.015) on the runner's 30 chunks | yes: board 0.2429 s, 45.3 MB at 72 chunks |
+| c2b0f70 | The plan keeps every BOOL query's and phrase's terms in one array each (no allocation per query); term table presized | 1.013 (1.002-1.034) | yes |
+
+Tested on the board only, and reverted: six threads instead of twelve (0.342 s: SMT pays, the lookups are latency-bound); skipping a query in a chunk where a term every match needs is absent (0.2628 and 0.2491 s); reusing each thread's chunk lists and bitmaps (0.2475 s); cache-line-aligned shared summaries (0.2453 s); eight chunks per thread with the touched-terms index (0.2715 s: each chunk costs ~1 ms of query evaluation on the box, which the 2-vCPU runner cannot show).
 
 Chunk count and the shared summaries could only be judged on the box (the 2-vCPU runner makes 30 chunks whatever the setting, and memory is the box's cgroup peak). Board runs, in order: per-thread summaries with 3, 5, 6, 8 and 12 chunks per thread gave M 91, 73, 67, 60 and 53 MB at T 0.239-0.274 s (eight best, K 21.38); packing count and sum into one word and sharing one summary per query across threads took eight per thread from 57.7 to 41.0 MB (K 22.16); with shared summaries, four, six and eight per thread gave 0.2400 s / 61.6 MB, 0.2435 s / 47.4 MB and 0.2667 s / 41.0 MB, so six (K 22.85).
 
@@ -108,3 +114,14 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 440c037 | one shared summary per BOOL query (atomic count/sum, ten smallest under a per-query lock) instead of one per thread: M 57.7 -> 41.0, T 0.2667, K 22.16, best so far | run-d4460d2736f9 | 0.2667 | 41.0 | 1007 | 22.16 |
 | 13d1b99 | EXPERIMENT (pushed as d96fdfe): six chunks per thread with shared summaries: T 0.2435, M 47.4, K 22.85, best so far | run-246ec4cb0362 | 0.2435 | 47.4 | 1007 | 22.85 |
 | 980f7e2 | EXPERIMENT: four chunks per thread with shared summaries: T 0.2400, M 61.6, K 21.84; back to six | run-2e066b2c521a | 0.2400 | 61.6 | 1007 | 21.84 |
+| d9cdcc7 | six chunks per thread with shared summaries, final setting (second sample): 0.2450, M 48.6, K 22.67 | run-b6fb144e1767 | 0.2450 | 48.6 | 1007 | 22.67 |
+| 16345d2 | TIMING PROBE (fails the hash on purpose): tokenizing only, current code: 141 ms of a ~244 ms run, so postings, scatter, queries and output are ~103 ms | run-9578547a6a23 | 0.1412 | 20.5 | - | - |
+| 056f68d | chunk index over the touched terms only (no per-chunk tables over all 53,000 terms): T 0.2429, M 45.3, K 23.08, best so far (x86 A/B 0.989, no clear difference on the runner's 30 chunks) | run-f9140b400283 | 0.2429 | 45.3 | 1011 | 23.08 |
+| 9983071 | EXPERIMENT: eight chunks per thread with the touched-terms index: T 0.2715, M 39.7, K 21.96: each chunk costs ~1 ms of query evaluation; back to six | run-f84dcbaab6f0 | 0.2715 | 39.7 | 1011 | 21.96 |
+| 173ed27 | six chunks per thread, queries skipped where a required term is absent: 0.2628, M 45.1 (box slow this run? A 0.0280); resampled | run-c766d50d2fe6 | 0.2627 | 45.1 | 1025 | 22.17 |
+| 932c26e | required-term skip, second sample: 0.2491 (0.2628 before; 0.2429 without it): no gain, reverted | run-d7648d6e074f | 0.2491 | 45.8 | 1025 | 22.69 |
+| 2d30f22 | chunk lists and bitmaps reused per thread (no unmap per chunk): 0.2475, M 47.7: no gain, reverted | run-da2cdc79becd | 0.2475 | 47.7 | 1020 | 22.59 |
+| 0c5d410 | EXPERIMENT: six threads (one per core): 0.3422, M 40.8: SMT pays (the lookups are latency-bound); back to twelve | run-17e3636ad8a6 | 0.3422 | 40.8 | 1011 | 19.55 |
+| 99ef432 | EXPERIMENT: shared summaries aligned to one cache line each: 0.2453, M 45.2: within noise of 0.2429; reverted | run-8a587ccf5560 | 0.2453 | 45.2 | 1012 | 22.97 |
+| 658ebc5 | TIMING PROBE (fails the hash on purpose): exits after parsing the queries and filling the term table: 18.1 ms of the plan's 23.0 | run-416c9b2f02ff | 0.0181 | 8.2 | - | - |
+| c2b0f70 | plan stores BOOL and phrase terms in one array each, term table presized (x86 A/B 1.013x): 0.2392, M 43.4, K 23.42, best so far | run-95827e1ba6a8 | 0.2392 | 43.4 | 1003 | 23.42 |
