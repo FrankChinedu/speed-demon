@@ -288,25 +288,9 @@ fn parse(
             // The method starts at byte 28 and is at most 7 bytes, so the space after it
             // is in the next word: no branch on which method it is.
             let ep_start = 29 + first_byte(word(line, 28), SPACES);
-            // Find the space after the endpoint eight bytes at a time, hashing each word
-            // on the way, so the endpoint is scanned once for both jobs.
-            let (mut k, mut h) = (ep_start, 0u64);
-            let ep_end = loop {
-                let w = word(line, k);
-                let x = w ^ SPACES;
-                let spaces = x.wrapping_sub(ONES) & !x & HIGHS; // high bit set in each 0x20 byte
-                if spaces != 0 {
-                    let n = spaces.trailing_zeros() as usize / 8;
-                    h = mix(h, w & ((1u64 << (n * 8)) - 1));
-                    break k + n;
-                }
-                h = mix(h, w);
-                k += 8;
-            };
-            let id = table.id(
-                &line[ep_start..ep_end],
-                mix(h, (ep_end - ep_start) as u64) | 1,
-            );
+            let (ep_len, h) = endpoint(line, ep_start);
+            let ep_end = ep_start + ep_len;
+            let id = table.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -352,6 +336,56 @@ fn word(b: &[u8], i: usize) -> u64 {
             u64::from_le_bytes(w)
         }
     }
+}
+
+/// The endpoint starting at `b[at]`: its length and the hash of its bytes. One compare
+/// of the 64 bytes at `at` finds the space after any name of up to 63 bytes (about
+/// 95% of lines), which is then hashed in eight fixed steps over its zero-padded
+/// words: no branch depends on the length, so none is mispredicted. Longer names are
+/// scanned and hashed word by word. Which form hashes a name depends on its length
+/// alone, so a name always gets the same hash.
+#[inline]
+fn endpoint(b: &[u8], at: usize) -> (usize, u64) {
+    let spaces = space_mask(b, at);
+    if spaces != 0 {
+        let len = spaces.trailing_zeros() as usize;
+        let mut h = 0;
+        for k in 0..8 {
+            let keep = len.saturating_sub(8 * k).min(8);
+            h = mix(h, word(b, at + 8 * k) & ((1u128 << (8 * keep)) - 1) as u64);
+        }
+        return (len, h);
+    }
+    let (mut k, mut h) = (at, 0u64);
+    loop {
+        let w = word(b, k);
+        let n = first_byte(w, SPACES);
+        if n < 8 {
+            return (k + n - at, mix(h, w & ((1u64 << (n * 8)) - 1)));
+        }
+        h = mix(h, w);
+        k += 8;
+    }
+}
+
+/// Bit k set where `b[at + k]` is a space, for the 64 bytes at `at` (none past the end).
+#[inline]
+fn space_mask(b: &[u8], at: usize) -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    if let Some(block) = b.get(at..at + 64) {
+        use std::arch::x86_64::*;
+        // SAFETY: AVX2 is enabled at compile time, and the two unaligned loads read
+        // exactly the 64 bytes of `block`.
+        return unsafe {
+            let half = |k: usize| {
+                let v = _mm256_loadu_si256(block.as_ptr().add(k) as *const __m256i);
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b' ' as i8))) as u32
+            };
+            half(0) as u64 | (half(32) as u64) << 32
+        };
+    }
+    let tail = &b[at.min(b.len())..];
+    (tail.iter().take(64).enumerate()).fold(0, |m, (k, &c)| m | ((c == b' ') as u64) << k)
 }
 
 /// Index of the first byte of `w` equal to the byte repeated in `pattern` (8 if none).
