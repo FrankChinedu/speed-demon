@@ -240,6 +240,8 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     mmap::one_arena();
     let plan = plan(mmap::map(&data.join("queries.txt")));
+    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
+    std::process::exit(0); // TIMING PROBE
     let docs = mmap::map(&data.join("docs.txt"));
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
