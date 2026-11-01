@@ -254,7 +254,7 @@ struct Seen<'a> {
 
 /// Bitset shards, and pairs queued per shard before a thread applies them.
 const SHARDS: usize = 16;
-const QUEUE: usize = 2048;
+const QUEUE: usize = 256;
 
 impl Seen<'_> {
     /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,
@@ -495,8 +495,9 @@ impl Field {
     }
 }
 
-/// Reads a quoted or unquoted text field starting at `p`.
-#[inline]
+/// Reads a quoted or unquoted text field starting at `p`. Forced inline: as a call it
+/// returns its four words through memory, twice per record.
+#[inline(always)]
 fn field(c: &[u8], p: usize) -> Field {
     if c[p] != b'"' {
         let end = find(c, p, b',');

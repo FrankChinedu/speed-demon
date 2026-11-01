@@ -286,3 +286,7 @@ e542027	d	run-961d2e4f493a	0.2103	159.1	507	18.13
 0abea93	b	run-fc3d04d33f27	0.3114	99.9	866	17.81	
 0abea93	c	run-47cadd8d72a8	0.0532	14.0	551	24.80	region join batched with the name lookups (x86 A/B 1.024x); box: no better than 4c412e0
 0abea93	d	run-fc0dac0fc1e4	0.2122	160.0	507	18.03	
+8cab084	a	run-eaa1a15098c2	0.0406	24.4	442	32.21	code unchanged from 0abea93
+8cab084	b	run-14c9232a3ae4	0.3082	98.8	866	17.94	
+8cab084	c	run-33d21f3ee9b6	0.0526	14.4	530	24.94	check: sharded bitset alone (code of e542027) is also ~0.053 on the box, so e542027 at 0.0477 was a lucky run
+8cab084	d	run-883885200225	0.2001	160.4	507	18.56	
