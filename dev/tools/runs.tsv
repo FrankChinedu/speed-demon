@@ -358,3 +358,7 @@ dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53
 1fa8e0d	b	run-c77952a9364b	0.3156	99.1	866	17.72	
 1fa8e0d	c	run-458d2f1e49c4	0.0410	11.0	515	29.96	565 -> 515 code lines (x86 A/B within noise)
 1fa8e0d	d	run-403a9e56da3f	0.1988	159.6	507	18.64	
+bc5e6ce	a	run-453835a024df	0.0273	22.9	526	38.76	summary hours written outside the writer lock
+bc5e6ce	b	run-99be49d4aabd	0.3369	99.2	866	17.14	
+bc5e6ce	c	run-43f317ca7e9f	0.0417	10.5	515	30.00	code unchanged from 1fa8e0d
+bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39	
