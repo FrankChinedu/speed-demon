@@ -275,7 +275,7 @@ struct Shared<'a> {
 
 /// Bitset shards, and pairs queued per shard before a thread applies them.
 const SHARDS: usize = 16;
-const QUEUE: usize = 512;
+const QUEUE: usize = 256;
 
 impl Shared<'_> {
     /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,

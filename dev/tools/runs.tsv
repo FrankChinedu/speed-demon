@@ -409,11 +409,15 @@ ae1dbdb	d	run-28d381916cb6	0.1965	124.8	541	19.50	code unchanged from 6753993: 0
 5b22af8	b	run-4008000a794b	0.2515	80.5	975	20.32	token mask walked as made (no mask buffer), hashes written by index (x86 A/B 1.066x): 0.2515, best so far
 5b22af8	c	run-3a7f2391411d	0.0443	10.9	515	28.90	
 5b22af8	d	run-fd8b5cd7de79	0.2077	129.2	541	18.84	code unchanged from 6753993
-ecdc8d2	a	run-141cc11e0268	0.0271	21.7	526	39.34	
-ecdc8d2	c	run-bdedccb4b1e8	0.0406	11.3	515	29.96	
+ecdc8d2	a	run-141cc11e0268	0.0271	21.7	526	39.34	TUNING (7865cb4): record blocks of 512 instead of 1,024: M 21.7 (from ~22.5), T unchanged; kept
+ecdc8d2	c	run-bdedccb4b1e8	0.0406	11.3	515	29.96	FAILED TUNING (7865cb4): bitset queues of 512: M 11.3 (from ~10.8), T unchanged; reverted
 ecdc8d2	d	run-18bbe7ed4ae6	0.1943	127.8	541	19.52	code unchanged from 6753993: 0.1943, best so far
 ecdc8d2	b	run-595ce917a2d1	0.0230	10.5	-	-	TIMING PROBE (fails the hash on purpose): exits after the plan: 23.0 ms of serial start-up (~9% of the run)
 71d9df1	a	run-8b457cace67c	0.0273	22.5	526	38.88	
 71d9df1	b	run-eda3fb3c894d	0.2549	82.2	978	20.10	
 71d9df1	c	run-bf7c593e77af	0.0409	10.9	515	30.05	
 71d9df1	d	run-dd4d91961baa	0.1983	127.1	541	19.34	
+35887e4	a	run-3315687849d9	0.0288	21.6	526	38.19	
+35887e4	b	run-a905e7520c5f	0.2396	80.2	975	20.84	
+35887e4	c	run-2165ce29a260	0.0411	10.8	515	30.03	
+35887e4	d	run-37d551e5ce7b	0.2309	123.0	541	18.04	
