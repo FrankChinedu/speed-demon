@@ -76,6 +76,7 @@ struct Plan {
 /// its list would be), listed in `dense` by term with its first word in `bits`, and
 /// marked in `is_dense`, so a term absent from the chunk (most rare terms, in most
 /// chunks) is answered without searching `dense`.
+#[derive(Default)]
 struct ChunkIndex {
     base: u32,
     words: usize,
@@ -248,18 +249,20 @@ fn main() {
                     let mut results: Vec<Summary> = bools.iter().map(|_| Summary::default()).collect();
                     let mut matches = Vec::new();
                     let mut acc = Acc::default();
-                    let mut last = vec![NONE; plan.n_bool];
                     let mut ids = Vec::with_capacity(1024);
                     let mut scratch = Scratch::default();
                     // The chunk's postings, `doc offset << 16 | BOOL index` (there are at
                     // most 65,536 BOOL terms), split by term range; and each term's count.
                     let mut postings = Postings {
                         groups: vec![Vec::new(); GROUPS],
-                        count: vec![0; plan.n_bool],
+                        seen: vec![(NONE, 0); plan.n_bool],
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
                             .saturating_sub(GROUPS.ilog2()),
+                        ci: ChunkIndex::default(),
+                        slot: Vec::new(),
+                        cursor: Vec::new(),
                     };
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let mut keys: Vec<(u32, u32, u32)> = Vec::new();
@@ -278,11 +281,8 @@ fn main() {
                                 let s = &plan.terms.slots[*t as usize];
                                 let b = s.info & !KEYED;
                                 *t = s.id;
-                                if b != NO_BOOL && last[b as usize] != doc {
-                                    last[b as usize] = doc;
-                                    postings.count[b as usize] += 1;
-                                    postings.groups[b as usize >> postings.shift]
-                                        .push(offset << 16 | b);
+                                if b != NO_BOOL {
+                                    postings.add(doc, offset, b);
                                 }
                                 if s.info & KEYED != 0 {
                                     let k = &plan.key_first[s.id as usize..];
@@ -382,60 +382,74 @@ const GROUPS: usize = 64;
 /// stay in cache, instead of all ~50,000 lists at once.
 struct Postings {
     groups: Vec<Vec<u32>>,
-    count: Vec<u32>,
+    /// Per BOOL term: the last document that gave it a posting, and its count in the
+    /// chunk, side by side so a token touches one cache line.
+    seen: Vec<(u32, u32)>,
     shift: u32,
+    /// The chunk's index and the scatter's scratch, reused from chunk to chunk.
+    ci: ChunkIndex,
+    slot: Vec<u32>,
+    cursor: Vec<u32>,
 }
 
 impl Postings {
+    /// Records that document `doc` (at `offset` in the chunk) contains BOOL term `b`.
+    #[inline]
+    fn add(&mut self, doc: u32, offset: u32, b: u32) {
+        let seen = &mut self.seen[b as usize];
+        if seen.0 != doc {
+            *seen = (doc, seen.1 + 1);
+            self.groups[b as usize >> self.shift].push(offset << 16 | b);
+        }
+    }
+
     /// Turns the chunk's postings into its index and empties the buffers. Documents
     /// were visited in order, so every list comes out ascending.
-    fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
-        let n_bool = self.count.len();
-        let words = n_docs.div_ceil(64);
+    fn index(&mut self, base: u32, n_docs: usize) -> &ChunkIndex {
+        let Postings { groups, seen, ci, slot, cursor, .. } = self;
+        let n_bool = seen.len();
+        (ci.base, ci.words) = (base, n_docs.div_ceil(64));
         // Dense terms (in more than 1/16 of the documents) become bitmaps and get an
         // empty list range.
-        let mut offsets = vec![0u32; n_bool + 1];
-        let mut dense = Vec::new();
-        let mut is_dense = vec![0u64; n_bool.div_ceil(64)];
-        let mut slot = vec![u32::MAX; n_bool];
+        ci.offsets.resize(n_bool + 1, 0);
+        ci.dense.clear();
+        ci.is_dense.clear();
+        ci.is_dense.resize(n_bool.div_ceil(64), 0);
+        slot.resize(n_bool, 0);
         let mut total = 0;
-        for (b, c) in self.count.iter_mut().enumerate() {
-            offsets[b] = total;
+        for (b, (_, c)) in seen.iter_mut().enumerate() {
+            ci.offsets[b] = total;
+            slot[b] = u32::MAX;
             if *c as usize * 16 > n_docs {
-                slot[b] = (dense.len() * words) as u32;
-                dense.push((b as u32, slot[b]));
-                is_dense[b / 64] |= 1 << (b % 64);
+                slot[b] = (ci.dense.len() * ci.words) as u32;
+                ci.dense.push((b as u32, slot[b]));
+                ci.is_dense[b / 64] |= 1 << (b % 64);
             } else {
                 total += *c;
             }
             *c = 0;
         }
-        offsets[n_bool] = total;
-        let mut cursor = offsets.clone();
-        let mut docs = vec![0u16; total as usize];
-        let mut bits = vec![0u64; dense.len() * words];
-        for group in &mut self.groups {
+        ci.offsets[n_bool] = total;
+        cursor.clear();
+        cursor.extend_from_slice(&ci.offsets);
+        ci.docs.clear();
+        ci.docs.resize(total as usize, 0);
+        ci.bits.clear();
+        ci.bits.resize(ci.dense.len() * ci.words, 0);
+        for group in groups.iter_mut() {
             for &p in group.iter() {
                 let (d, b) = ((p >> 16) as usize, (p & 0xffff) as usize);
                 match slot[b] {
                     u32::MAX => {
-                        docs[cursor[b] as usize] = d as u16;
+                        ci.docs[cursor[b] as usize] = d as u16;
                         cursor[b] += 1;
                     }
-                    w => bits[w as usize + d / 64] |= 1 << (d % 64),
+                    w => ci.bits[w as usize + d / 64] |= 1 << (d % 64),
                 }
             }
             group.clear();
         }
-        ChunkIndex {
-            base,
-            words,
-            offsets,
-            docs,
-            dense,
-            is_dense,
-            bits,
-        }
+        ci
     }
 }
 
