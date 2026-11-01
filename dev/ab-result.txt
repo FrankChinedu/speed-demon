@@ -1,0 +1,12 @@
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+### A/B track b: base 5d5e810 vs head aa60984
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 766.21 | 754.41 | OK |
+| head | 777.15 | 747.58 | OK |
+
+speedup base/head 0.986, 95% CI [0.974, 1.004]: **no clear difference**
