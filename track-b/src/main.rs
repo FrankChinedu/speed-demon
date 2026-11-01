@@ -320,24 +320,28 @@ fn main() {
                             break;
                         }
                         let mut buf = Vec::with_capacity(BLOCK * 40);
-                        for q in &plan.queries[k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len())]
-                        {
-                            let mut result = Summary::default();
-                            match q {
-                                Query::Phrase(p) => phrase_docs(*p).for_each(|d| result.add(d)),
-                                Query::Bool(first, rest) => {
-                                    for ci in index {
-                                        if rest.is_empty() {
-                                            emit(ci.set(*first), ci.base, &mut result);
-                                            continue;
-                                        }
-                                        acc.start(ci.set(*first));
-                                        for &(op, t) in rest {
-                                            acc.apply(op, ci.set(t));
-                                        }
-                                        acc.emit(ci.base, &mut result);
-                                    }
+                        let block = &plan.queries[k * BLOCK..((k + 1) * BLOCK).min(plan.queries.len())];
+                        let mut results: Vec<Summary> = block.iter().map(|_| Summary::default()).collect();
+                        // Chunk by chunk, so one chunk's offsets and lists stay in cache for
+                        // the whole block. Chunks ascend, so each result still gets its
+                        // documents in order.
+                        for ci in index {
+                            for (q, result) in block.iter().zip(&mut results) {
+                                let Query::Bool(first, rest) = q else { continue };
+                                if rest.is_empty() {
+                                    emit(ci.set(*first), ci.base, result);
+                                    continue;
                                 }
+                                acc.start(ci.set(*first));
+                                for &(op, t) in rest {
+                                    acc.apply(op, ci.set(t));
+                                }
+                                acc.emit(ci.base, result);
+                            }
+                        }
+                        for (q, result) in block.iter().zip(&mut results) {
+                            if let Query::Phrase(p) = q {
+                                phrase_docs(*p).for_each(|d| result.add(d));
                             }
                             result.write(&mut buf);
                         }
