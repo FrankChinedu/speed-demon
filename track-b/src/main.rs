@@ -270,8 +270,6 @@ fn main() {
                             ids.clear();
                             keys.clear();
                             tokenize(text, &plan.terms, &mut scratch, &mut ids);
-                            n_docs += std::hint::black_box(ids.len()) & 0; // TIMING PROBE
-                            if std::hint::black_box(true) { return; } // TIMING PROBE
                             // Each token's BOOL posting (once per document) and whether a
                             // phrase is keyed on it, from its slot; then the slot index
                             // becomes the term id the phrase check compares.
@@ -309,8 +307,6 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // A phrase can match one document at several positions; count the document once.
     let mut matches: Vec<(u32, u32)> = partial.iter().flat_map(|(_, m)| m).copied().collect();
     matches.sort_unstable();
