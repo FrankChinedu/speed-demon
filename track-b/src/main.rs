@@ -633,7 +633,7 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
             .iter()
             .position(|&b| b == b'\t')
             .expect("TAB after the id");
-        let eol = tab + find_newline(&line[tab..]);
+        let eol = tab + line[tab..].iter().position(|&b| b == b'\n').unwrap_or(line.len() - tab);
         let doc = line[..tab]
             .iter()
             .fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
@@ -641,43 +641,6 @@ fn for_each_doc(chunk: &[u8], mut f: impl FnMut(u32, &[u8])) {
         f(doc, &line[tab + 1..eol]);
         p += eol + 1;
     }
-}
-
-/// Position of the first LF in `s` (or `s.len()`), 32 bytes at a time.
-#[inline]
-fn find_newline(s: &[u8]) -> usize {
-    let mut p = 0;
-    while let Some(block) = s.get(p..p + 32) {
-        let m = newline_mask(block.try_into().unwrap());
-        if m != 0 {
-            return p + m.trailing_zeros() as usize;
-        }
-        p += 32;
-    }
-    p + s[p..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .unwrap_or(s.len() - p)
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline]
-fn newline_mask(block: &[u8; 32]) -> u32 {
-    use std::arch::x86_64::*;
-    // SAFETY: AVX2 is enabled at compile time, and the load reads the 32-byte array.
-    unsafe {
-        let v = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
-        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8))) as u32
-    }
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-#[inline]
-fn newline_mask(block: &[u8; 32]) -> u32 {
-    block
-        .iter()
-        .enumerate()
-        .fold(0, |m, (i, &b)| m | ((b == b'\n') as u32) << i)
 }
 
 /// Bytes 0xFF then 0x00: the word at `KEEP[32 - len + 8 * w..]` keeps the bytes of
