@@ -530,6 +530,8 @@ fn plan(text: &'static [u8]) -> Plan {
         }
     }
 
+    std::fs::write("/out/results.txt", b"").ok(); // TIMING PROBE
+    std::process::exit(0); // TIMING PROBE
     // BOOL terms get dense indices so each chunk's offset table only covers them.
     let n_terms = terms.count as usize;
     let mut bool_index = vec![NONE; n_terms];
