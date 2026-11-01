@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 7362b59)
+HEAD is now at 7362b59 Track D: in-edges read back from the out rows into the same buffer instead of a second parse of the text (the box probe put the second parse at ~20 ms). Each piece of 16 buckets of rows counts its edges per head bucket, reserves its ranges with one atomic add per bucket, then writes them; still one edge array alive
+$ cargo build --release -q
+### A/B track d: base dd1f0a3 vs head 7362b59
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 707.25 | 696.23 | OK |
+| head | 658.84 | 650.19 | OK |
+
+speedup base/head 1.073, 95% CI [1.064, 1.081]: **head FASTER**
