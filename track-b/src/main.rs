@@ -1064,8 +1064,6 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
 /// lock, and `tenth` mirrors the last of them: a chunk whose smallest match is not
 /// below it cannot change them, so the lock is skipped. `tenth` only decreases, so a
 /// stale read can only take the lock needlessly, never miss an update.
-/// One cache line each, so an update moves one line between cores, not two.
-#[repr(align(64))]
 struct Shared {
     packed: AtomicU64,
     tenth: AtomicU32,
