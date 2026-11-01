@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ab6ef0f)
+HEAD is now at ab6ef0f Track B: newline found by a plain position search (no 32-byte AVX2 newline scan)
+$ cargo build --release -q
+### A/B track b: base 4e89bb7 vs head ab6ef0f
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 736.52 | 732.98 | OK |
+| head | 876.33 | 868.41 | OK |
+
+speedup base/head 0.840, 95% CI [0.838, 0.845]: **head SLOWER**
