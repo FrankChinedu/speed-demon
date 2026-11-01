@@ -58,14 +58,15 @@ enum Query {
 
 /// Everything known from queries.txt before the corpus is read.
 struct Plan {
-    terms: Terms,
+    table: Table,
     n_bool: usize,
     queries: Vec<Query>,
     phrases: Vec<Vec<u32>>,
     /// Each phrase is checked only where its key term occurs: the phrase's term used
     /// by the fewest queries, a proxy for the rarest in the corpus (almost every
     /// phrase is built around a rare anchor). A term's keyed phrases, with the key's
-    /// position inside each, are `keyed[key_first[id]..key_first[id + 1]]`.
+    /// position inside each, are `keyed[key_first[t]..key_first[t + 1]]`, where t is
+    /// the term's slot in the table (which is also its id everywhere after the plan).
     keyed: Vec<(u32, u32)>,
     key_first: Vec<u32>,
 }
@@ -269,19 +270,17 @@ fn main() {
                             n_docs += 1;
                             ids.clear();
                             keys.clear();
-                            tokenize(text, &plan.terms, &mut scratch, &mut ids);
+                            tokenize(text, &plan.table, &mut scratch, &mut ids);
                             // Each token's BOOL posting (once per document) and whether a
-                            // phrase is keyed on it, from its slot; then the slot index
-                            // becomes the term id the phrase check compares.
-                            for (i, t) in ids.iter_mut().enumerate().filter(|(_, t)| **t != NONE) {
-                                let s = &plan.terms.slots[*t as usize];
-                                let b = s.info & !KEYED;
-                                *t = s.id;
-                                if b != NO_BOOL {
+                            // phrase is keyed on it, from its slot.
+                            for (i, &t) in ids.iter().enumerate().filter(|(_, t)| **t != NONE) {
+                                let e = plan.table.slots[t as usize];
+                                let b = (e & T_NO_BOOL) as u32;
+                                if b != T_NO_BOOL as u32 {
                                     postings.add(doc, offset, b);
                                 }
-                                if s.info & KEYED != 0 {
-                                    let k = &plan.key_first[s.id as usize..];
+                                if e & T_KEYED != 0 {
+                                    let k = &plan.key_first[t as usize..];
                                     keys.push((i as u32, k[0], k[1]));
                                 }
                             }
@@ -535,27 +534,44 @@ fn plan(text: &'static [u8]) -> Plan {
             (terms[at], p as u32, at as u32)
         })
         .collect();
-    let mut key_first = vec![0u32; n_terms + 1];
+    // The corpus pass reads a compact copy of the table, and from here on a term is
+    // known by its slot: phrases and phrase keys are renumbered to match.
+    let cap = terms.slots.len();
+    let mut slot_of = vec![0u32; n_terms];
+    for (i, s) in terms.slots.iter().enumerate().filter(|(_, s)| s.hash != 0) {
+        slot_of[s.id as usize] = i as u32;
+    }
+    let mut key_first = vec![0u32; cap + 1];
     keys.iter()
-        .for_each(|&(t, ..)| key_first[t as usize + 1] += 1);
-    for t in 0..n_terms {
+        .for_each(|&(t, ..)| key_first[slot_of[t as usize] as usize + 1] += 1);
+    for t in 0..cap {
         key_first[t + 1] += key_first[t];
     }
     let mut cursor = key_first.clone();
     let mut keyed = vec![(0, 0); keys.len()];
     for &(t, p, at) in &keys {
-        keyed[cursor[t as usize] as usize] = (p, at);
-        cursor[t as usize] += 1;
+        let t = slot_of[t as usize] as usize;
+        keyed[cursor[t] as usize] = (p, at);
+        cursor[t] += 1;
     }
-    for s in terms.slots.iter_mut().filter(|s| s.hash != 0) {
-        let t = s.id as usize;
-        s.info = bool_index[t].min(NO_BOOL);
-        if key_first[t] != key_first[t + 1] {
-            s.info |= KEYED;
-        }
+    let slots = (terms.slots.iter().enumerate())
+        .map(|(i, s)| match s.hash {
+            0 => 0,
+            h => {
+                let keyed = if key_first[i] != key_first[i + 1] { T_KEYED } else { 0 };
+                Table::tag(h) | (bool_index[s.id as usize] as u64).min(T_NO_BOOL) | keyed
+            }
+        })
+        .collect();
+    let table = Table {
+        mask: terms.mask,
+        slots,
+    };
+    for terms in &mut phrases {
+        terms.iter_mut().for_each(|t| *t = slot_of[*t as usize]);
     }
     Plan {
-        terms,
+        table,
         n_bool: {
             assert!(n_bool <= 1 << 16, "BOOL term indices are 16-bit");
             n_bool as usize
@@ -660,28 +676,61 @@ static KEEP: [u8; 64] = {
 /// are a few word operations instead of a byte loop and a `memcmp` through a pointer.
 type Key = [u64; 4];
 
-/// Everything a corpus token needs, in one 16-byte slot: the term's hash, its id, and
-/// `info`, its dense BOOL index (or NO_BOOL) with the KEYED bit set if phrases are
-/// keyed on it. Four slots share a cache line, so the 69,000 terms of a full query set
-/// take 2 MB.
+/// A query term while the plan is built: its hash and its id in order of appearance.
 #[derive(Clone, Copy, Default)]
-#[repr(C, align(16))]
 struct Slot {
     hash: u64,
     id: u32,
-    info: u32,
 }
 
-const KEYED: u32 = 1 << 31;
-const NO_BOOL: u32 = KEYED - 1;
+/// The table the corpus pass reads: the plan's table copied slot for slot, one word
+/// per slot, `tag | info`. The tag is the hash's top 46 bits (bit 63 forced on, so a
+/// filled slot is never 0); `info` is the term's dense BOOL index (or T_NO_BOOL) with
+/// T_KEYED set if phrases are keyed on it. Eight slots share a cache line, so the
+/// ~75,000 terms of a full query set take 1 MB, which fits the box's L2.
+///
+/// A corpus token is mistaken for a query term only if it shares the 45 free tag bits
+/// and its home slot (the hash's low 17 bits, independent of the tag) falls in the
+/// short run of slots probed: about 2^-61 per pair, or ~2 * 10^-8 per run for the
+/// spec's 600,000 distinct tokens and 75,000 query terms.
+struct Table {
+    mask: usize,
+    slots: Vec<u64>,
+}
 
-/// Open-addressing table from query terms to their slots, built once, read by every
-/// thread. Terms are identified by a strong 64-bit hash of their bytes, so a lookup
-/// is one cache miss with no key comparison. (A corpus token would have to share all
-/// 64 bits with a query term to be mistaken for it: about 4 * 10^-9 per run for the
-/// spec's 600,000 distinct tokens and 110,000 query terms.) Most corpus tokens are
-/// query terms, so there is no filter in front of it: on the box a 128 KB bit filter
-/// saved nothing.
+const INFO_BITS: u32 = 18;
+const T_KEYED: u64 = 1 << 17;
+const T_NO_BOOL: u64 = T_KEYED - 1;
+
+impl Table {
+    #[inline]
+    fn tag(h: u64) -> u64 {
+        (h | 1 << 63) >> INFO_BITS << INFO_BITS
+    }
+
+    /// The slot of the term with hash `h`, or NONE if it is not a query term. Most
+    /// corpus tokens are query terms found at their first slot, so that test comes
+    /// first.
+    #[inline]
+    fn find(&self, h: u64) -> u32 {
+        let (tag, mut i) = (Table::tag(h), h as usize & self.mask);
+        loop {
+            let e = self.slots[i];
+            if e >> INFO_BITS << INFO_BITS == tag {
+                return i as u32;
+            }
+            if e == 0 {
+                return NONE;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+}
+
+/// Open-addressing table from query terms to their ids while the plan is built.
+/// Terms are identified by a strong 64-bit hash of their bytes, so a lookup needs no
+/// key comparison. Most corpus tokens are query terms, so there is no filter in front
+/// of the corpus pass's copy: on the box a 128 KB bit filter saved nothing.
 struct Terms {
     mask: usize,
     slots: Vec<Slot>,
@@ -720,7 +769,6 @@ impl Terms {
         self.place(Slot {
             hash: h,
             id: self.count,
-            info: NO_BOOL,
         });
         self.count += 1;
         self.count - 1
@@ -735,9 +783,6 @@ impl Terms {
     }
 
     /// The slot index of the term with hash `h`, or NONE if it is not a query term.
-    /// Most corpus tokens are query terms found at their first slot, so that test
-    /// comes first.
-    #[inline]
     fn find(&self, h: u64) -> u32 {
         let mut i = h as usize & self.mask;
         loop {
@@ -775,7 +820,7 @@ fn hash(k: &Key) -> u64 {
 /// The term table does not fit in L2, so the lookups for a whole document go in
 /// stages: hash and slot prefetch for every token, then the probes. The misses of
 /// one stage overlap instead of each token waiting for its own.
-fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, slots: &mut Vec<u32>) {
+fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
     token_mask(text, &mut scratch.mask);
     scratch.hashes.clear();
     let mut token = |start: usize, end: usize| {
