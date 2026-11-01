@@ -182,16 +182,37 @@ fn main() {
         .expect("write aggregates.txt");
 }
 
+/// Region id -> country index. One byte per id, so the table is 1 MB; a second byte
+/// per id is added only if a 255th country appears (the spec has 240).
+struct Regions {
+    lo: Vec<u8>,
+    hi: Vec<u8>, // empty while one byte is enough
+}
+
+impl Regions {
+    /// The country of region `id`, or None if `id` has no region.
+    #[inline]
+    fn get(&self, id: usize) -> Option<usize> {
+        let g = *self.lo.get(id)? as usize | self.hi.get(id).map_or(0, |&h| (h as usize) << 8);
+        let none = if self.hi.is_empty() { 0xFF } else { 0xFFFF };
+        (g != none).then_some(g)
+    }
+}
+
 /// regions.csv: `region_id,country` lines after a header, ids ascending, codes
-/// `[A-Z]{3}`. Returns the distinct country codes and a dense region id -> country
-/// index table. Codes index a 26^3 table directly, so there is no hashing.
-fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u16>) {
+/// `[A-Z]{3}`. Returns the distinct country codes and the region table. Codes index
+/// a 26^3 table directly, so there is no hashing.
+fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Regions) {
     let mut codes: Vec<&[u8]> = Vec::new();
     let mut by_code = vec![NO_REGION; 26 * 26 * 26];
     // Ids ascend, so the last line holds the largest: size the table once.
     let body = text.strip_suffix(b"\n").unwrap_or(text);
     let last = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    let mut region = vec![NO_REGION; digits(body, last).0 as usize + 1];
+    let n = digits(body, last).0 as usize + 1;
+    let mut region = Regions {
+        lo: vec![0xFF; n],
+        hi: Vec::new(),
+    };
     let mut p = text
         .iter()
         .position(|&b| b == b'\n')
@@ -201,10 +222,23 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Vec<u16>) {
         let code = &text[comma + 1..comma + 4];
         let key = code.iter().fold(0, |k, &b| k * 26 + (b - b'A') as usize);
         if by_code[key] == NO_REGION {
+            if codes.len() == 0xFF {
+                // Index 255 would read as "no region": widen. Ids without a region
+                // become 0xFFFF, the others keep a zero high byte.
+                region.hi = region
+                    .lo
+                    .iter()
+                    .map(|&l| if l == 0xFF { 0xFF } else { 0 })
+                    .collect();
+            }
             by_code[key] = codes.len() as u16;
             codes.push(code);
         }
-        region[id as usize] = by_code[key];
+        let g = by_code[key];
+        region.lo[id as usize] = g as u8;
+        if !region.hi.is_empty() {
+            region.hi[id as usize] = (g >> 8) as u8;
+        }
         p = comma + 5;
     }
     (codes, region)
@@ -290,7 +324,7 @@ impl Seen<'_> {
 fn parse(
     c: &[u8],
     first: bool,
-    region: &[u16],
+    region: &Regions,
     aggs: &mut [Agg],
     names: &Names,
     seen: &Seen,
@@ -323,10 +357,7 @@ fn parse(
                 None => 0,
             };
 
-        let g = match region.get(region_id as usize) {
-            Some(&r) if r != NO_REGION => r as usize,
-            _ => unmatched as usize,
-        };
+        let g = region.get(region_id as usize).unwrap_or(unmatched as usize);
         let a = &mut aggs[g];
         a.count += 1;
         a.id_sum += id;
