@@ -79,7 +79,7 @@ struct Plan {
 struct ChunkIndex<'a> {
     base: u32,
     words: usize,
-    seen: &'a [(u16, u16)],
+    count: &'a [u16],
     pos: &'a [u32],
     docs: Vec<u16>,
     bits: Vec<u64>,
@@ -90,7 +90,7 @@ const DENSE: u32 = 1 << 31;
 impl ChunkIndex<'_> {
     #[inline]
     fn set(&self, b: u32) -> Set<'_> {
-        let (count, p) = (self.seen[b as usize].1 as usize, self.pos[b as usize]);
+        let (count, p) = (self.count[b as usize] as usize, self.pos[b as usize]);
         if count == 0 {
             return Set::List(&[]);
         }
@@ -279,7 +279,9 @@ fn main() {
                     // most 65,536 BOOL terms), split by term range; and each term's count.
                     let mut postings = Postings {
                         groups: vec![Vec::new(); GROUPS],
-                        seen: vec![(u16::MAX, 0); plan.n_bool + 1],
+                        in_doc: vec![0; plan.n_bool.div_ceil(64)],
+                        doc_terms: Vec::new(),
+                        count: vec![0; plan.n_bool],
                         touched: Vec::new(),
                         pos: vec![0; plan.n_bool],
                         shift: (plan.n_bool.max(1) - 1)
@@ -310,6 +312,7 @@ fn main() {
                                     keys.push((i as u32, k[0], k[1]));
                                 }
                             }
+                            postings.end_doc();
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
                         assert!(n_docs < 1 << 16, "chunk too large for 16-bit offsets");
@@ -406,13 +409,15 @@ const GROUPS: usize = 64;
 /// stay in cache, instead of all ~50,000 lists at once.
 struct Postings {
     groups: Vec<Vec<u32>>,
-    /// Per BOOL term: the offset of the last document of the chunk that gave it a
-    /// posting (u16::MAX before the first), and its count in the chunk, side by side
-    /// in 4 bytes so a token touches one small cache line. The spare last entry is
-    /// never written.
-    seen: Vec<(u16, u16)>,
-    /// The BOOL terms with a posting in this chunk, in order of first posting: the
-    /// chunk's index is built, and `seen` reset, over these alone.
+    /// One bit per BOOL term for the document being read (6.7 KB for 53,000 terms,
+    /// so it stays in L1), and the terms it set, which clear it at the document's end.
+    in_doc: Vec<u64>,
+    doc_terms: Vec<u32>,
+    /// Per BOOL term, its number of documents in the chunk, counted from the postings
+    /// when the chunk is indexed (0: absent).
+    count: Vec<u16>,
+    /// The BOOL terms with a posting in this chunk: the chunk's index is built, and
+    /// the counts reset, over these alone.
     touched: Vec<u32>,
     /// Per BOOL term, meaningful only while its count is not 0: where its postings
     /// end in the chunk's list buffer, or DENSE | where its bitmap starts.
@@ -424,17 +429,25 @@ impl Postings {
     /// Records that the document at `offset` in the chunk contains BOOL term `b`.
     #[inline]
     fn add(&mut self, offset: u32, b: u32) {
-        debug_assert!((b as usize) < self.seen.len() - 1);
-        // SAFETY: `b` is a BOOL index from the term table, below n_bool, and `seen`
-        // has n_bool + 1 entries.
-        let seen = unsafe { self.seen.get_unchecked_mut(b as usize) };
-        if seen.0 != offset as u16 {
-            if seen.1 == 0 {
-                self.touched.push(b);
-            }
-            *seen = (offset as u16, seen.1 + 1);
+        let (w, bit) = (b as usize / 64, 1 << (b % 64));
+        debug_assert!(w < self.in_doc.len());
+        // SAFETY: `b` is a BOOL index from the term table, below n_bool, and `in_doc`
+        // has n_bool.div_ceil(64) words.
+        let word = unsafe { self.in_doc.get_unchecked_mut(w) };
+        if *word & bit == 0 {
+            *word |= bit;
+            self.doc_terms.push(b);
             self.groups[b as usize >> self.shift].push(offset << 16 | b);
         }
+    }
+
+    /// Clears the document's bits.
+    #[inline]
+    fn end_doc(&mut self) {
+        for &b in &self.doc_terms {
+            self.in_doc[b as usize / 64] = 0;
+        }
+        self.doc_terms.clear();
     }
 
     /// Turns the chunk's postings into its index and empties the posting buffers.
@@ -442,9 +455,20 @@ impl Postings {
     /// terms the chunk touched are visited.
     fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex<'_> {
         let words = n_docs.div_ceil(64);
+        // Count each term's documents; the groups hold one term range each, so the
+        // counters touched stay in cache.
+        for group in &self.groups {
+            for &p in group {
+                let c = &mut self.count[(p & 0xffff) as usize];
+                if *c == 0 {
+                    self.touched.push(p & 0xffff);
+                }
+                *c += 1;
+            }
+        }
         let (mut total, mut dense) = (0, 0);
         for &b in &self.touched {
-            let c = self.seen[b as usize].1 as u32;
+            let c = self.count[b as usize] as u32;
             if c as usize * 64 > n_docs {
                 self.pos[b as usize] = DENSE | (dense * words) as u32;
                 dense += 1;
@@ -472,7 +496,7 @@ impl Postings {
         ChunkIndex {
             base,
             words,
-            seen: &self.seen,
+            count: &self.count,
             pos: &self.pos,
             docs,
             bits,
@@ -482,7 +506,7 @@ impl Postings {
     /// Forgets the chunk: the touched terms' counts go back to 0.
     fn reset(&mut self) {
         for &b in &self.touched {
-            self.seen[b as usize] = (u16::MAX, 0);
+            self.count[b as usize] = 0;
         }
         self.touched.clear();
     }
