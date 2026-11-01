@@ -244,11 +244,12 @@ fn main() {
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    // Eight chunks per thread: with queries evaluated per chunk and the index then
-    // dropped, smaller chunks mean smaller per-thread buffers (board: 4 per thread
-    // 79 MB, 8 per thread 60 MB, 12 per thread slower). About 2.6 MB and 2,600
-    // documents each at full scale, well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 4).max(docs.len() >> 23));
+    // Six chunks per thread. Queries are evaluated per chunk and the index dropped,
+    // so smaller chunks mean smaller per-thread buffers but more evaluations (board,
+    // with shared summaries: four 0.240 s / 62 MB, six 0.244 s / 47 MB, eight
+    // 0.267 s / 41 MB). About 3.5 MB and 3,500 documents each at full scale, well
+    // inside the 16-bit offsets.
+    let chunks = split_lines(docs, (threads * 6).max(docs.len() >> 23));
 
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
