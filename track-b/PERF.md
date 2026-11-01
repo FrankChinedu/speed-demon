@@ -14,8 +14,28 @@ Before the first push, steps were measured locally with `tools/sd.py bench` (Doc
 
 ## Notes
 
-- 21.1M (term, doc) postings for 53,444 BOOL terms. 369 terms with df > N/32 hold half of them, so bitmaps for those are the next memory step.
+- 21.1M (term, doc) postings for 53,444 BOOL terms. 369 terms with df > N/32 hold half of them.
+- Box timing probes (Nov 1): tokenizing alone is ~148 ms of a ~284 ms run (154 ms before the boundary walk, 168 ms with the 8 MB term table); postings, phrases, the per-chunk scatter and the queries were the other ~136 ms.
+- Memory on the box carries ~24 MB more than the arrays explain (B's tokenize-only probe 31.6 MB against ~6 MB of data; D shows the same). It is not thread stacks (256 KB stacks changed nothing) and not malloc arenas (one arena saved 3.7 MB).
 - Tokenization is byte-exact ASCII: `A-Z` lowercased, runs of `a-z0-9`, every other byte (including all UTF-8 bytes) separates.
+
+## x86 A/B on the GitHub runner
+
+From Nov 1 afternoon, board noise on B (the same code measured 0.279 and 0.323 s) was larger than most single steps, so each candidate was first timed against its base by `dev/tools/ab.py` (`.github/workflows/ab.yml`): both commits built on an x86-64 runner (2 vCPUs, AVX2), the full seed-1 output hash checked, then 15 alternating runs each, with a bootstrap 95% confidence interval of the speedup. Only winners went to the board. Failures are listed too.
+
+| Candidate | Change | Speedup (95% CI) | Kept |
+|---|---|---|---|
+| 9327878 | Tokens walked boundary by boundary (mask XOR itself shifted marks every start and end) instead of two bit scans per token; lookup tests a hit first | 1.018 (1.012-1.025) | yes |
+| 23f2428 | Branch-free first-occurrence test for postings (write every token's term, advance only for a new BOOL term) | 0.967 (0.955-0.981) | no |
+| 68b9d50 | Each term's last document and chunk count side by side; chunk index buffers reused per thread | 1.020 (1.017-1.034) | the first half: reuse cost 5 MB on the box and timed 1.001 (0.992-1.009) without it |
+| 0ee7820 | Corpus pass reads a compact 1 MB copy of the term table (one word per slot: 46-bit tag, BOOL index, keyed flag) | 1.017 (1.012-1.028) | yes |
+| 63c2495 | Bitmaps for terms in more than 1/64 of a chunk (was 1/16): the index is dropped after its chunk's queries, so bitmaps cost no lasting memory, and most query time was short list merges | 1.023 (1.020-1.026) | yes |
+| 1/128, 1/256 | The same threshold pushed further | 0.988 (0.970-0.999), 0.958 (0.934-0.976) | no |
+| e7c72cb | Results summarised in bulk once their ten smallest ids are known: a bitmap word adds its popcount and the sum of its set bit positions (six masked popcounts) | 1.074 (1.071-1.077) | yes |
+| 7a33ede | Postings entry shrunk to (u16, u16) and prefetched from the tokenizer | 0.983 (0.973-0.997) | no |
+| a29740b | The (u16, u16) entry alone | 1.012 (1.001-1.015) | yes |
+
+An x86 profile (`.github/workflows/prof.yml`, perf by source line on the runner) guided the last three rows: ~10% of the run on the postings-entry miss, ~10% on the term-table probe, ~15% in `Vec` push and extend paths, ~5% in the hash finaliser.
 
 ## Board runs
 
@@ -47,3 +67,19 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | cef5dc1 | TIMING PROBE (fails the hash on purpose): no counting sort: the sort costs ~84 ms | run-9fe8abd767c0 | 0.1883 | 34.8 | - | - |
 | 6024f45 | postings collected by term range, scattered one range at a time; no term filter | run-718e56e8faac | 0.2914 | 99.6 | 866 | 18.42 |
 | 4b83e56 | FAILED EXPERIMENT: eight chunks per thread: slower queries over twice the chunks; reverted | run-eb7d798fa4af | 0.3087 | 95.6 | 871 | 18.03 |
+| 01fdee3 | noise check: docs-only commit, code unchanged from 4dd375f | run-f573abb0f149 | 0.3434 | 99.8 | 866 | 16.96 |
+| 5042f52 | TIMING PROBE (fails the hash on purpose): exits after the corpus pass: 213 ms, so the merge and queries cost ~80-120 ms (full runs measure 0.29-0.34 s) | run-e94923ac235b | 0.2133 | 98.3 | - | - |
+| 41f7f9f | 16-byte term slots, growth at 60%: table 8 -> 2 MB; M 99 -> 92.9. T inconclusive: the whole box ran ~15% slow this run (A unchanged at 0.0314 vs 0.0273) | run-29b9ce5806c3 | 0.3187 | 92.9 | 871 | 17.85 |
+| 86e958d | queries evaluated chunk by chunk within each block of 256 (on top of the 16-byte slots): 0.2821, best so far | run-b8f1f8347870 | 0.2821 | 92.2 | 876 | 18.98 |
+| 87155c8 | TIMING PROBE (fails the hash on purpose): tokenizing only (mask, hash, lookups) with the 2 MB table: 153.8 ms (168.4 with the 8 MB table in 18cf889) | run-492611e3eeca | 0.1538 | 31.6 | - | - |
+| 7f10e38 | per-chunk bitset of dense terms (no binary search for absent terms): 0.2917, within noise of 0.2821 | run-654ed82480d7 | 0.2917 | 91.7 | 881 | 18.67 |
+| 7a22f66 | 256 KB worker stacks: M unchanged (91.9), so thread stacks are not the ~24 MB; T 0.2787 (dense bitset in, second sample) | run-0e13ef120e87 | 0.2787 | 91.9 | 882 | 19.09 |
+| bfafaeb | code unchanged from 7a22f66 (0.2787 there): ~15% board noise on B | run-49a1bdeea31b | 0.3227 | 91.1 | 882 | 17.77 |
+| 1e03453 | one malloc arena (M_ARENA_MAX = 1): M 91.9 -> 88.2 | run-ae0c70a17d1f | 0.3008 | 88.2 | 892 | 18.49 |
+| 8ce6ac2 | BOOL queries evaluated on each chunk while its index is in cache, index dropped, per-thread summaries merged: M 88.2 -> 80.7, T 0.2958 (same as recent samples) | run-463b8ed9da48 | 0.2958 | 80.7 | 907 | 18.93 |
+| 165fb12 | last document and count side by side, chunk index buffers reused: T 0.3047, M 80.7 -> 85.5 (reused Vecs grow by doubling) | run-c11d1e528ebf | 0.3047 | 85.5 | 923 | 18.39 |
+| 529b16e | tokens walked boundary by boundary, hit-first lookup (9327878): 0.2854; x86 A/B 1.018x, CI 1.012-1.025 | run-1561581721e1 | 0.2854 | 86.1 | 932 | 18.95 |
+| ffbc9b1 | chunk index allocated per chunk again (side-by-side last document and count kept): M 86.1 -> 81.0, T 0.2838; x86 A/B vs reuse 1.001x (no difference) | run-467e344c1143 | 0.2838 | 81.0 | 920 | 19.28 |
+| 09b5340 | TIMING PROBE (fails the hash on purpose): tokenizing only with the boundary walk: 148 ms (153.8 before); the full run is ~284, so postings, phrases, scatter and queries cost ~136 ms | run-093e92657a78 | 0.1480 | 41.8 | - | - |
+| f6cc5dc | compact 1 MB term table (x86 A/B 1.017x) and bitmaps above 1/64 of a chunk (1.023x; 1/256 was 0.958x): 0.2735, M 83.6 | run-cf8c5529a0a8 | 0.2735 | 83.6 | 959 | 19.39 |
+| ae1dbdb | results summarised in bulk once the ten smallest ids are known (popcounts for bitmap words; x86 A/B 1.074x): 0.2536, best so far | run-a92f27e7df26 | 0.2536 | 82.6 | 978 | 20.13 |

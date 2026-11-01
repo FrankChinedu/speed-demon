@@ -22,5 +22,5 @@ None. Standard library only. `mmap` is declared directly against the C library t
 
 ## With another 24 hours
 
-- Queries are two thirds of the run (a box probe exits after the build at 64 ms of 194 ms). A goal-directed search (ALT landmarks) would cut settled nodes, if its preprocessing can fit in the budget.
-- Peak memory is the two row tables plus the build's edge arrays. Returning edge memory progressively did not lower the box's peak (huge pages stay charged), so a smaller row layout is the remaining lever.
+- Queries are about two thirds of the run. An x86 profile puts 22% of the whole run in the distance-map probes (each relaxation probes its own side's map and the other side's). A goal-directed search (ALT landmarks) would cut settled nodes, and so probes, if its preprocessing fits the budget.
+- Peak memory is set during the build (box probe: 127 MB), ~23 MB above the row tables and the one edge array. Finding where that comes from is the next memory step.

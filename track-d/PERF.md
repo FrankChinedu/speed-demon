@@ -15,7 +15,17 @@ Measured locally with `tools/sd.py bench` (Docker on an Apple M1 Pro, 8 vCPUs, a
 ## Notes
 
 - 2,000 queries, median Dijkstra rank 512, mean about 12,300. The largest octaves dominate total work.
-- Memory is mostly the 56 MB of rows plus each thread's warm search buffers. On the box's 12 threads expect more than measured here on 8.
+- Memory (Nov 1): 16-byte rows of u32 edges make both row tables 56 MB, and only one 40 MB edge array is alive during the build. A box probe exiting after the build measures the peak there (127 MB), ~23 MB above the arrays; a probe exiting after the counting parse measures 8 MB, so that excess comes during the build. Thread stacks (256 KB) and pinned glibc thresholds did not change it.
+
+## x86 A/B on the GitHub runner
+
+Board noise on D is about ±8% (unchanged code measured 0.196 to 0.241 s), so after the first misjudged revert, candidates were timed by `dev/tools/ab.py` on an x86-64 runner: full seed-1 hash checked, 15 alternating runs each, bootstrap 95% CI.
+
+| Candidate | Change | Speedup (95% CI) | Kept |
+|---|---|---|---|
+| 7362b59 | In-edges read back from the out rows into the same buffer instead of a second parse of the text | 1.073 (1.064-1.081) over the second parse | yes (it had been reverted on two noisy board samples, and was restored) |
+
+An x86 profile of the full run puts 22% in the distance-map probe loop (every relaxation probes its own side's map and the other side's, both up to 1 MB and random), 7% in heap pushes and 6% in row loads. Cutting those probes needs dense per-node arrays (~14 MB per side per thread) or a goal-directed search.
 
 ## Board runs
 
@@ -43,3 +53,19 @@ Every step measured on the scoring box by the live board, in order. Rows marked 
 | 3f4cfda | TIMING PROBE (fails the hash on purpose): exits after the graph build, so queries take ~130 ms | run-e071af406290 | 0.0640 | 159.3 | - | - |
 | 0f789db | FAILED EXPERIMENT: progressive madvise of edge arrays at 4 KB granularity: THP pages split but stay charged (233 MB) | run-98a13889884e | 0.2119 | 233.5 | 552 | 16.52 |
 | 30de835 | FAILED EXPERIMENT: same with 2 MB-aligned release: memory still not returned on the box; reverted | run-fee778b3c1f5 | 0.1991 | 236.0 | 552 | 17.00 |
+| 01fdee3 | noise check: docs-only commit, code unchanged from 4dd375f | run-176c2326db53 | 0.2038 | 159.5 | 507 | 18.41 |
+| 5042f52 | 16-byte rows of four u32 edges ((head + 1) << 11 | weight), one direction built at a time (text parsed again): M 159.7 -> 127.1, T within noise | run-7619465cb5d5 | 0.2152 | 127.1 | 509 | 18.73 |
+| 41f7f9f | code unchanged from 9ff61a0 (slow box run, see A) | run-708452eb3f0e | 0.2276 | 127.0 | 509 | 18.22 |
+| 86e958d | glibc mmap threshold pinned at 128 KB and one-word heap entries: M unchanged (128.3), so freed buffers in the arenas were not the cause | run-65b120e87a0a | 0.2035 | 128.3 | 521 | 19.16 |
+| 87155c8 | code unchanged from fe2348f | run-10aabc67718c | 0.2137 | 125.4 | 521 | 18.78 |
+| 7f10e38 | TIMING PROBE (fails the hash on purpose): exits after the build: 84 ms (64 before the second parse), M 127.3, so the build sets the peak, ~24 MB above its arrays (B shows the same ~24 MB: 12 thread stacks on huge pages?) | run-5d533060e3ff | 0.0841 | 127.3 | - | - |
+| 7a22f66 | 256 KB worker stacks: M unchanged (125.3); reverted | run-d981a2d08b17 | 0.2086 | 125.3 | 522 | 19.01 |
+| bfafaeb | in-edges read back from the out rows instead of a second parse: 0.2199, M 129.0; same run as B's slow sample, needs a resample | run-23b89a4be2b5 | 0.2199 | 129.0 | 542 | 18.31 |
+| 1e03453 | TIMING PROBE (fails the hash on purpose): exits after the counting parse: 14.4 ms, M 8.0, so the ~23 MB above the arrays comes during the build, not from the process or its threads | run-79c9c91fe995 | 0.0144 | 8.0 | - | - |
+| 8ce6ac2 | in-edges from the out rows, second sample: 0.2200 again, no faster than the second parse; reverted | run-3ead8c2a70bd | 0.2200 | 127.7 | 541 | 18.34 |
+| 165fb12 | back to the second parse (same code as 0559a7e): 0.2258, so D now samples ~0.22 either way | run-24e72fc43c94 | 0.2258 | 126.9 | 521 | 18.24 |
+| 529b16e | second parse (code unchanged since 0559a7e): 0.2411, board noise on D; x86 A/B puts in-edges-from-rows (7362b59) at 1.073x over this | run-fb24a58b1209 | 0.2411 | 124.6 | 521 | 17.71 |
+| ffbc9b1 | in-edges read back from the out rows, restored (x86 A/B 1.073x over the second parse): 0.2129 | run-b057b94f104b | 0.2129 | 129.1 | 541 | 18.61 |
+| 09b5340 | code unchanged from 6753993 | run-483d2267abd5 | 0.2254 | 127.7 | 541 | 18.13 |
+| f6cc5dc | code unchanged from 6753993 (in-edges from the out rows): 0.1959, best so far | run-913b74adc131 | 0.1959 | 127.0 | 541 | 19.46 |
+| ae1dbdb | code unchanged from 6753993: 0.1965 (second sample at ~0.196) | run-28d381916cb6 | 0.1965 | 124.8 | 541 | 19.50 |
