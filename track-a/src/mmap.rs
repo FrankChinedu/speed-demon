@@ -16,6 +16,8 @@ pub fn small_pages() {
     }
 }
 
+use std::ptr::null_mut;
+
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
@@ -33,16 +35,7 @@ const ANON_NORESERVE: i32 = 0x02 | 0x1000 | 0x40;
 pub fn reserve(len: usize) -> *mut u8 {
     // SAFETY: a fresh anonymous mapping with no address hint and no file; it overlaps
     // nothing else in the process.
-    let ptr = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            len,
-            PROT_READ_WRITE,
-            ANON_NORESERVE,
-            -1,
-            0,
-        )
-    };
+    let ptr = unsafe { mmap(null_mut(), len, PROT_READ_WRITE, ANON_NORESERVE, -1, 0) };
     assert!(ptr as isize != -1, "mmap of {len} bytes failed");
     ptr
 }

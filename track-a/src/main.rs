@@ -21,10 +21,12 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Barrier, Mutex, OnceLock};
-use std::thread;
+use std::thread::{self, available_parallelism};
 
 /// Every timestamp is in the 72 hours from 2026-10-30T18:00Z (spec section 2).
 const HOURS: usize = 72;
+/// Absolute hour (since the Unix epoch) of the span's first hour.
+const BASE: i64 = days_from_civil(2026, 10, 30) * 24 + 18;
 /// Records pack the endpoint id above a 21-bit latency; larger latencies go to `big`.
 const LAT_BITS: u32 = 21;
 const LAT_MASK: u32 = (1 << LAT_BITS) - 1;
@@ -99,20 +101,15 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let input = File::open(data.join("requests.log")).expect("open requests.log");
     let len = input.metadata().expect("stat requests.log").len() as usize;
-    let threads = thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(12);
-    // Absolute hour (since the Unix epoch) of the span's first hour.
-    let base = days_from_civil(2026, 10, 30) * 24 + 18;
+    let threads = available_parallelism().map_or(1, |n| n.get().min(12));
 
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
     let next = AtomicUsize::new(0);
     let registry = Registry::new();
     // A line has at least 40 bytes, so no hour can hold more than len / 39 of them,
     // plus one partly filled block per thread.
-    let records: Vec<Records> = (0..HOURS)
-        .map(|_| Records::new(len / 39 + (threads + 1) * BLOCK))
-        .collect();
+    let cap = len / 39 + (threads + 1) * BLOCK;
+    let records: Vec<Records> = (0..HOURS).map(|_| Records::new(cap)).collect();
     let by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
     let writer = Mutex::new(Writer {
         next: 0,
@@ -123,7 +120,7 @@ fn main() {
     // exit unmapping its stack (a TLB shootdown on every core), costs more than the
     // barrier between the phases.
     let barrier = Barrier::new(threads);
-    let sorted: OnceLock<(Vec<&[u8]>, Vec<usize>)> = OnceLock::new();
+    let sorted: OnceLock<Sorted> = OnceLock::new();
     let next_hour = AtomicUsize::new(0);
     thread::scope(|s| {
         for _ in 0..threads {
@@ -131,10 +128,8 @@ fn main() {
             let (by_hour, writer, barrier, sorted) = (&by_hour, &writer, &barrier, &sorted);
             let next_hour = &next_hour;
             s.spawn(move || {
-                for (slot, hour) in by_hour
-                    .iter()
-                    .zip(parse(input, len, next, base, registry, records))
-                {
+                let hours = parse(input, next, registry, records);
+                for (slot, hour) in by_hour.iter().zip(hours) {
                     slot.lock().unwrap().push(hour);
                 }
                 if barrier.wait().is_leader() {
@@ -148,16 +143,15 @@ fn main() {
                     sorted.set((names, order)).unwrap();
                 }
                 barrier.wait();
-                let (names, order) = sorted.get().unwrap();
-                let mut scratch = Scratch::new(names.len());
+                let sorted = sorted.get().unwrap();
+                let mut scratch = Scratch::new(sorted.0.len());
                 loop {
                     let h = next_hour.fetch_add(1, Relaxed);
                     if h >= HOURS {
                         break;
                     }
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
-                    let prefix = hour_prefix(base + h as i64);
-                    let lines = scratch.summarize(parts, &records[h], prefix, names, order);
+                    let lines = scratch.summarize(parts, &records[h], BASE + h as i64, sorted);
                     let mut w = writer.lock().unwrap();
                     let w = &mut *w;
                     w.done[h] = Some(lines);
@@ -172,6 +166,9 @@ fn main() {
         }
     });
 }
+
+/// The endpoint names by id, and the ids in bytewise name order (the output order).
+type Sorted<'a> = (Vec<&'a [u8]>, Vec<usize>);
 
 /// One summarizing thread's buffers, reused from hour to hour.
 struct Scratch {
@@ -192,20 +189,16 @@ impl Scratch {
     }
 
     /// The summary lines of one hour, from every thread's records of that hour.
-    fn summarize(
-        &mut self,
-        parts: Vec<Hour>,
-        records: &Records,
-        prefix: [u8; 21],
-        names: &[&[u8]],
-        order: &[usize],
-    ) -> Vec<u8> {
+    /// `sorted` holds the endpoint names by id and the ids in name order.
+    fn summarize(&mut self, parts: Vec<Hour>, recs: &Records, h: i64, sorted: &Sorted) -> Vec<u8> {
+        let (names, order) = sorted;
+        let prefix = hour_prefix(h);
         let (count, errors, end) = (&mut self.count, &mut self.errors, &mut self.end);
         count.fill(0);
         errors.fill(0);
         for p in &parts {
             for &(start, len) in &p.blocks {
-                for &r in records.get(start, len) {
+                for &r in recs.get(start, len) {
                     count[(r >> LAT_BITS) as usize] += 1;
                 }
             }
@@ -227,7 +220,7 @@ impl Scratch {
         lat.resize(total as usize, 0);
         for p in parts {
             for &(start, len) in &p.blocks {
-                for &r in records.get(start, len) {
+                for &r in recs.get(start, len) {
                     let at = &mut end[(r >> LAT_BITS) as usize];
                     lat[*at as usize] = r & LAT_MASK;
                     *at += 1;
@@ -241,7 +234,7 @@ impl Scratch {
         }
         // SAFETY: this hour's task is the only user of its mapping, and its records are
         // all copied out: nothing reads them again.
-        unsafe { mmap::release(records.base as *mut u8, records.cap * 4) };
+        unsafe { mmap::release(recs.base as *mut u8, recs.cap * 4) };
 
         let mut out = Vec::with_capacity(1 << 18);
         for &e in order {
@@ -253,15 +246,9 @@ impl Scratch {
             let [p50, p95, p99] = percentiles(&mut lat[hi - n as usize..hi]);
             out.extend_from_slice(&prefix);
             out.extend_from_slice(names[e]);
-            let errs = errors[e] as u64;
-            for v in [
-                n as u64,
-                p50 as u64,
-                p95 as u64,
-                p99 as u64,
-                errs,
-                errs * 1_000_000 / n as u64,
-            ] {
+            let errs = errors[e];
+            let ppm = (errs as u64 * 1_000_000 / n as u64) as u32;
+            for v in [n, p50, p95, p99, errs, ppm] {
                 out.push(b' ');
                 push_num(&mut out, v);
             }
@@ -284,14 +271,8 @@ const SLACK: usize = 256;
 /// The input is read with `pread` into one reused buffer per thread rather than
 /// mapped: a mapping costs a page-table entry per 4 KB page to set up, and to tear
 /// down serially when the process exits.
-fn parse(
-    input: &File,
-    len: usize,
-    next: &AtomicUsize,
-    base: i64,
-    registry: &Registry,
-    records: &[Records],
-) -> Vec<Hour> {
+fn parse(input: &File, next: &AtomicUsize, reg: &Registry, recs: &[Records]) -> Vec<Hour> {
+    let len = input.metadata().unwrap().len() as usize;
     let mut buf = vec![0u8; CHUNK + SLACK + 1];
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
     // Per hour: the start of the block being filled, its slots, and how many are used.
@@ -306,17 +287,13 @@ fn parse(
         // Also read the byte before the chunk: the first line starts after its first LF.
         let from = start.saturating_sub(1);
         let chunk = &mut buf[..(CHUNK + SLACK + 1).min(len - from)];
-        input
-            .read_exact_at(chunk, from as u64)
-            .expect("read requests.log");
+        input.read_exact_at(chunk, from as u64).unwrap();
         let chunk = &*chunk;
+        let first_lf = chunk.iter().position(|&b| b == b'\n');
         let mut i = if start == 0 {
             0
         } else {
-            chunk
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(chunk.len(), |p| p + 1)
+            first_lf.map_or(chunk.len(), |p| p + 1)
         };
         let own = start + CHUNK - from; // lines starting before this are ours
         while i < own.min(chunk.len()) {
@@ -328,18 +305,15 @@ fn parse(
                 date_hours =
                     days_from_civil(num(&line[0..4]), num(&line[5..7]), num(&line[8..10])) * 24;
             }
-            let hour = date_hours + num(&line[11..13]) - base;
-            assert!(
-                (0..HOURS as i64).contains(&hour),
-                "timestamp outside the 72-hour span"
-            );
+            let hour = date_hours + num(&line[11..13]) - BASE;
+            assert!((0..HOURS as i64).contains(&hour), "hour out of span");
             let hour = hour as usize;
             // The method starts at byte 28 and is at most 7 bytes, so the space after it
             // is in the next word: no branch on which method it is.
             let ep_start = 29 + first_byte(word(line, 28), SPACES);
             let (ep_len, h) = endpoint(line, ep_start);
             let ep_end = ep_start + ep_len;
-            let id = registry.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
+            let id = reg.id(&line[ep_start..ep_end], mix(h, ep_len as u64) | 1);
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
 
@@ -355,7 +329,7 @@ fn parse(
                 if *used > 0 {
                     hours[hour].blocks.push((*start, *used));
                 }
-                (*start, *block) = records[hour].claim();
+                (*start, *block) = recs[hour].claim();
                 *used = 0;
             }
             block[*used] = id << LAT_BITS | latency;
@@ -450,20 +424,9 @@ fn short_endpoint(block: &[u8; 64]) -> Option<(usize, u64)> {
             24, 25, 26, 27, 28, 29, 30, 31,
         );
         let at = [first, _mm256_add_epi8(first, _mm256_set1_epi8(32))];
-        let keys = [
-            _mm256_setr_epi64x(
-                0x1cad_21f7_2c81_017cu64 as i64,
-                0xdb97_9083_e96d_d4deu64 as i64,
-                0x1f67_b3b7_a4a4_4072u64 as i64,
-                0x78e5_c0cc_4ee6_79cbu64 as i64,
-            ),
-            _mm256_setr_epi64x(
-                0x8172_6f7d_c2b5_d2b8u64 as i64,
-                0x3b9a_6d9e_4b6b_a1c5u64 as i64,
-                0xf64d_5a5f_2b1f_0b8du64 as i64,
-                0x9e6c_5a3e_7c4d_2f19u64 as i64,
-            ),
-        ];
+        // A different key for each word, so names whose words are permutations of each
+        // other hash apart: one constant xored with the words' byte positions.
+        let keys = at.map(|i| _mm256_xor_si256(i, _mm256_set1_epi64x(0x1cad_21f7_2c81_017c)));
         let mut acc = _mm256_setzero_si256();
         for k in 0..2 {
             let d = _mm256_and_si256(v[k], _mm256_cmpgt_epi8(lens, at[k])); // bytes below len
@@ -573,13 +536,12 @@ impl Registry {
     #[cold]
     #[inline(never)]
     fn claim(&self, i: usize, tag: u64, name: &[u8]) -> Option<u32> {
-        self.slots[i]
-            .compare_exchange(0, tag, Acquire, Relaxed)
-            .ok()?;
+        let slot = &self.slots[i];
+        slot.compare_exchange(0, tag, Acquire, Relaxed).ok()?;
         let id = self.count.fetch_add(1, Relaxed);
         assert!((id as u64) < ID_MASK, "too many distinct endpoints");
         self.names[id as usize].set(name.to_vec()).unwrap();
-        self.slots[i].store(tag | (id as u64 + 1), Release);
+        slot.store(tag | (id as u64 + 1), Release);
         Some(id)
     }
 }
@@ -597,16 +559,18 @@ fn percentiles(v: &mut [u32]) -> [u32; 3] {
         v.sort_unstable();
         return [v[i50], v[i95], v[i99]];
     }
-    let p50 = *v.select_nth_unstable(i50).1;
+    // The value of rank `i` among `v[lo..]`, all at least as large as those before.
+    let mut select = |lo: usize, i: usize| *v[lo..].select_nth_unstable(i - lo).1;
+    let p50 = select(0, i50);
     let p95 = if i95 == i50 {
         p50
     } else {
-        *v[i50 + 1..].select_nth_unstable(i95 - i50 - 1).1
+        select(i50 + 1, i95)
     };
     let p99 = if i99 == i95 {
         p95
     } else {
-        *v[i95 + 1..].select_nth_unstable(i99 - i95 - 1).1
+        select(i95 + 1, i99)
     };
     [p50, p95, p99]
 }
@@ -632,22 +596,18 @@ fn num(digits: &[u8]) -> i64 {
         .fold(0, |acc, &b| acc * 10 + (b - b'0') as i64)
 }
 
-fn push_num(out: &mut Vec<u8>, mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
+fn push_num(out: &mut Vec<u8>, mut v: u32) {
+    let mut buf = [0u8; 10];
+    let digits = v.checked_ilog10().unwrap_or(0) as usize + 1;
+    for k in (0..digits).rev() {
+        buf[k] = b'0' + (v % 10) as u8;
         v /= 10;
-        if v == 0 {
-            break;
-        }
     }
-    out.extend_from_slice(&buf[i..]);
+    out.extend_from_slice(&buf[..digits]);
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
