@@ -366,3 +366,7 @@ bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39
 5042f52	c	run-e6b15ad2b876	0.0410	10.7	515	30.13	
 5042f52	d	run-7619465cb5d5	0.2152	127.1	509	18.73	16-byte rows of four u32 edges ((head + 1) << 11 | weight), one direction built at a time (text parsed again): M 159.7 -> 127.1, T within noise
 5042f52	b	run-e94923ac235b	0.2133	98.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the corpus pass: 213 ms, so the merge and queries cost ~80-120 ms (full runs measure 0.29-0.34 s)
+41f7f9f	a	run-9f2a4f91e879	0.0314	22.0	526	36.43	
+41f7f9f	b	run-29b9ce5806c3	0.3187	92.9	871	17.85	16-byte term slots, growth at 60%: table 8 -> 2 MB; M 99 -> 92.9. T inconclusive: the whole box ran ~15% slow this run (A unchanged at 0.0314 vs 0.0273)
+41f7f9f	c	run-2dff3887fd6d	0.0449	11.1	515	28.58	
+41f7f9f	d	run-708452eb3f0e	0.2276	127.0	509	18.22	code unchanged from 9ff61a0 (slow box run, see A)
