@@ -4,7 +4,7 @@
 //! 1. Hand out 128 KB chunks of the log to the threads, each read with `pread` into
 //!    the thread's one buffer. A chunk owns the lines that start in it.
 //! 2. Each thread parses its lines into 4-byte records `endpoint << 21 | latency`,
-//!    appended to one block list per hour. Endpoints get global ids from one
+//!    written into blocks it claims from its hour's mapping. Endpoints get global ids from one
 //!    lock-free table shared by all threads, by hash alone. Larger latencies and 5xx lines go to small side
 //!    lists of the hour. Timestamps are never fully parsed: only the date (cached,
 //!    since consecutive lines share it) and the two hour digits matter.
@@ -29,17 +29,60 @@ const HOURS: usize = 72;
 const LAT_BITS: u32 = 21;
 const LAT_MASK: u32 = (1 << LAT_BITS) - 1;
 const MAX_ENDPOINTS: usize = 1 << (32 - LAT_BITS);
-/// Records are kept in 256 KB blocks: above malloc's mmap threshold, so each block
-/// is its own mapping, charged only for the pages written and returned to the
-/// system when freed, instead of staying in a malloc arena.
-const BLOCK: usize = 1 << 16;
+/// Records are claimed from their hour's mapping in blocks of 1,024 (one 4 KB page).
+const BLOCK: usize = 1 << 10;
+
+/// One hour's records from every thread, in one mapping reserved at the start. A
+/// thread claims a block of BLOCK records with one atomic add and fills it alone.
+/// Once the hour is summarized the whole mapping goes back at once: one munmap, where
+/// freeing each thread's own blocks took about 860, each a TLB shootdown on every
+/// core (about 3.5 ms on the box). Pages never written cost nothing.
+struct Records {
+    base: *mut u32,
+    cap: usize,
+    next: AtomicUsize,
+}
+
+// SAFETY: threads share a mapping only through `claim`, which hands each block to
+// exactly one thread, and `get`, which runs after every writer has been joined.
+unsafe impl Sync for Records {}
+
+impl Records {
+    /// Room for `cap` records.
+    fn new(cap: usize) -> Self {
+        let base = mmap::reserve(cap * 4) as *mut u32;
+        Records {
+            base,
+            cap,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// A fresh block for the calling thread alone: its start and its slots.
+    fn claim(&self) -> (usize, &mut [u32]) {
+        let start = self.next.fetch_add(BLOCK, Relaxed);
+        assert!(start + BLOCK <= self.cap, "hour mapping full");
+        // SAFETY: blocks never overlap (each start comes from one atomic add) and lie
+        // inside the mapping, so the caller holds the only reference to these slots.
+        (start, unsafe {
+            std::slice::from_raw_parts_mut(self.base.add(start), BLOCK)
+        })
+    }
+
+    /// The records `start..start + len`, once the threads that wrote them are joined.
+    fn get(&self, start: usize, len: usize) -> &[u32] {
+        assert!(start + len <= self.cap);
+        // SAFETY: inside the mapping, and nothing writes it any more.
+        unsafe { std::slice::from_raw_parts(self.base.add(start), len) }
+    }
+}
 
 /// One thread's lines of one hour.
 #[derive(Default)]
 struct Hour {
-    blocks: Vec<Vec<u32>>,
-    big: Vec<(u32, u32)>, // (endpoint, latency) for latencies of 2^21 and up
-    errors: Vec<u16>,     // the endpoint of every 5xx line
+    blocks: Vec<(usize, usize)>, // (start, length) of each block it filled
+    big: Vec<(u32, u32)>,        // (endpoint, latency) for latencies of 2^21 and up
+    errors: Vec<u16>,            // the endpoint of every 5xx line
 }
 
 /// Summary lines are written in hour order as hours finish, in any order.
@@ -65,11 +108,16 @@ fn main() {
     // Many small chunks handed out on demand, so a slow core never holds up the rest.
     let next = AtomicUsize::new(0);
     let registry = Registry::new();
+    // A line has at least 40 bytes, so no hour can hold more than len / 39 of them,
+    // plus one partly filled block per thread.
+    let records: Vec<Records> = (0..HOURS)
+        .map(|_| Records::new(len / 39 + (threads + 1) * BLOCK))
+        .collect();
     let parts: Vec<Vec<Hour>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (input, next, registry) = (&input, &next, &registry);
-                s.spawn(move || parse(input, len, next, base, registry))
+                let (input, next, registry, records) = (&input, &next, &registry, &records);
+                s.spawn(move || parse(input, len, next, base, registry, records))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -98,6 +146,7 @@ fn main() {
     thread::scope(|s| {
         for _ in 0..threads {
             let (names, order, by_hour, writer, next) = (&names, &order, &by_hour, &writer, &next);
+            let records = &records;
             s.spawn(move || {
                 let mut scratch = Scratch::new(names.len());
                 loop {
@@ -106,8 +155,8 @@ fn main() {
                         break;
                     }
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
-                    let lines =
-                        scratch.summarize(parts, hour_prefix(base + h as i64), names, order);
+                    let prefix = hour_prefix(base + h as i64);
+                    let lines = scratch.summarize(parts, &records[h], prefix, names, order);
                     let mut w = writer.lock().unwrap();
                     let w = &mut *w;
                     w.done[h] = Some(lines);
@@ -145,6 +194,7 @@ impl Scratch {
     fn summarize(
         &mut self,
         parts: Vec<Hour>,
+        records: &Records,
         prefix: [u8; 21],
         names: &[Vec<u8>],
         order: &[usize],
@@ -153,8 +203,10 @@ impl Scratch {
         count.fill(0);
         errors.fill(0);
         for p in &parts {
-            for &r in p.blocks.iter().flatten() {
-                count[(r >> LAT_BITS) as usize] += 1;
+            for &(start, len) in &p.blocks {
+                for &r in records.get(start, len) {
+                    count[(r >> LAT_BITS) as usize] += 1;
+                }
             }
             for &(e, _) in &p.big {
                 count[e as usize] += 1;
@@ -173,13 +225,12 @@ impl Scratch {
         lat.clear();
         lat.resize(total as usize, 0);
         for p in parts {
-            for block in p.blocks {
-                for &r in &block {
+            for &(start, len) in &p.blocks {
+                for &r in records.get(start, len) {
                     let at = &mut end[(r >> LAT_BITS) as usize];
                     lat[*at as usize] = r & LAT_MASK;
                     *at += 1;
                 }
-                std::mem::forget(block); // MEASUREMENT: what freeing the record blocks costs
             }
             for (e, l) in p.big {
                 let at = &mut end[e as usize];
@@ -187,6 +238,9 @@ impl Scratch {
                 *at += 1;
             }
         }
+        // SAFETY: this hour's task is the only user of its mapping, and its records are
+        // all copied out: nothing reads them again.
+        unsafe { mmap::release(records.base as *mut u8, records.cap * 4) };
 
         let mut out = Vec::with_capacity(1 << 18);
         for &e in order {
@@ -235,10 +289,13 @@ fn parse(
     next: &AtomicUsize,
     base: i64,
     registry: &Registry,
+    records: &[Records],
 ) -> Vec<Hour> {
     let mut buf = vec![0u8; CHUNK + SLACK + 1];
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
-    let mut open: Vec<Vec<u32>> = vec![Vec::new(); HOURS];
+    // Per hour: the start of the block being filled, its slots, and how many are used.
+    let mut open: Vec<(usize, &mut [u32], usize)> =
+        (0..HOURS).map(|_| (0, &mut [][..], 0)).collect();
     let (mut date, mut date_hours) = ((u64::MAX, 0u16), 0i64);
     loop {
         let start = next.fetch_add(1, Relaxed) * CHUNK;
@@ -292,19 +349,21 @@ fn parse(
                 hours[hour].big.push((id, latency));
                 continue;
             }
-            let block = &mut open[hour];
-            if block.len() == block.capacity() {
-                let full = std::mem::replace(block, Vec::with_capacity(BLOCK));
-                if !full.is_empty() {
-                    hours[hour].blocks.push(full);
+            let (start, block, used) = &mut open[hour];
+            if *used == block.len() {
+                if *used > 0 {
+                    hours[hour].blocks.push((*start, *used));
                 }
+                (*start, *block) = records[hour].claim();
+                *used = 0;
             }
-            block.push(id << LAT_BITS | latency);
+            block[*used] = id << LAT_BITS | latency;
+            *used += 1;
         }
     }
-    for (hour, block) in hours.iter_mut().zip(open) {
-        if !block.is_empty() {
-            hour.blocks.push(block);
+    for (hour, (start, _, used)) in hours.iter_mut().zip(open) {
+        if used > 0 {
+            hour.blocks.push((start, used));
         }
     }
     hours

@@ -99,7 +99,7 @@ fn main() {
         overflow: &overflow,
     };
     // Many chunks handed out on demand, so a slow core never holds up the rest.
-    let chunks = split_records(records, threads * 32);
+    let chunks = split_records(records, threads * 8);
     let next = AtomicUsize::new(0);
     let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)

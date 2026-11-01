@@ -326,3 +326,7 @@ ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69
 46626c1	c	run-d0fdac40f096	0.0410	11.0	565	29.56	code of 851ead2 (XXH3 name hash reverted)
 46626c1	d	run-a9db004aea05	0.1974	159.8	507	18.70	
 46626c1	a	run-a5d1e237911e	0.0199	19.7	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse with the shared endpoint table: 19.9 ms (28.5 before), so phase 2 is now ~13 ms
+dd8490a	a	run-46fa46b9dfc3	0.0296	34.7	506	34.48	MEASUREMENT: record blocks leaked instead of freed in phase 2: 0.0296 vs ~0.033, so the frees cost ~3.5 ms (M +11.6 MB, not kept)
+dd8490a	b	run-bb33cdbb0caf	0.2959	99.1	866	18.30	
+dd8490a	c	run-e20a32f76633	0.0422	10.6	565	29.30	FAILED EXPERIMENT: 32 chunks per thread instead of 8: no gain; reverted
+dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53	
