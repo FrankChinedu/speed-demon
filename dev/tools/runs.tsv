@@ -525,3 +525,6 @@ c2b0f70	d	run-94f5b57c6fa8	0.2008	126.7	541	19.23	code unchanged from 6753993
 4e89bb7	b	run-64d77ba164c5	0.2725	44.0	965	22.07	39 lines fewer (class table, galloping; x86 A/B 0.999): S 1003 -> 965, T 0.2725 (a slow sample? resampled)
 4e89bb7	c	run-a37207afe626	0.0404	10.6	529	30.27	
 4e89bb7	d	run-8d693647f08a	0.2025	122.5	541	19.28	code unchanged from 6753993
+23af08c	b	run-43420fe402f4	0.2580	48.5	1007	22.10	
+23af08c	c	run-a67fb989c271	0.0414	11.3	529	29.54	
+23af08c	d	run-1d231f2e9ede	0.2130	126.9	541	18.67	

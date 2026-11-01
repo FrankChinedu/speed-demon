@@ -34,11 +34,15 @@ fn mix(h: u64, w: u64) -> u64 {
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 const NO_REGION: u16 = u16::MAX;
-/// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
-const NAME_SLOTS: usize = 1 << 18;
-/// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
-/// Rarer ids beyond it go to an overflow list, so the count stays exact regardless.
-const MAX_IDS: usize = 1 << 17;
+/// Name table slots: 1.5 MB. The spec's name pool is 100,000 values, so the table
+/// stays about half full.
+const NAME_SLOTS: usize = 3 << 16;
+/// Name ids that get a bit in each country's bitset: the spec's pool of 100,000 and
+/// the ids threads reserve but never use. Rarer ids beyond it go to an overflow list,
+/// so the count stays exact regardless. Each country's row is the 13 KB this needs.
+const MAX_IDS: usize = 1664 * 64;
+/// Where a queued pair keeps its country: above the 17 bits an id below MAX_IDS needs.
+const ID_SHIFT: u32 = 17;
 
 /// Running aggregates for one output line.
 #[derive(Clone, Copy)]
@@ -297,13 +301,13 @@ const SHARDS: usize = 16;
 const QUEUE: usize = 256;
 
 impl Shared<'_> {
-    /// Queues the pair `(g, id)`, packed as `g << 17 | id`: ids are below MAX_IDS = 2^17,
+    /// Queues the pair `(g, id)`, packed as `g << ID_SHIFT | id`: ids are below MAX_IDS < 2^17,
     /// and there are at most 26^3 + 1 < 2^15 countries.
     #[inline]
     fn insert(&self, queues: &mut [Vec<u32>], g: usize, id: u32) {
         if (id as usize) < MAX_IDS {
             let s = g >> self.shard_shift;
-            queues[s].push((g as u32) << MAX_IDS.trailing_zeros() | id);
+            queues[s].push((g as u32) << ID_SHIFT | id);
             if queues[s].len() == QUEUE {
                 self.apply(s, &mut queues[s]);
             }
@@ -317,8 +321,7 @@ impl Shared<'_> {
     fn apply(&self, s: usize, queue: &mut Vec<u32>) {
         let _held = self.locks[s].lock().unwrap();
         for &e in queue.iter() {
-            let bit =
-                (e >> MAX_IDS.trailing_zeros()) as usize * MAX_IDS + (e as usize & (MAX_IDS - 1));
+            let bit = (e >> ID_SHIFT) as usize * MAX_IDS + (e as usize & ((1 << ID_SHIFT) - 1));
             let word = &self.bits[bit / 64];
             word.store(word.load(Relaxed) | 1 << (bit % 64), Relaxed);
         }
@@ -404,9 +407,9 @@ fn prefetch<T>(r: &T) {
 
 /// Lock-free interning of names into dense ids, shared by all threads, keyed by a
 /// strong 64-bit hash of the raw field bytes. A slot is one word, the hash's top 40
-/// bits above `id + 1`, so the table is 2 MB and a lookup is one probe with no byte
-/// comparison. The low 18 hash bits pick the first slot, so a name is identified by
-/// 58 independent hash bits.
+/// bits above `id + 1`, so a lookup is one probe with no byte comparison. The low 24
+/// hash bits, scaled to the table, pick the first slot, so a name is identified by
+/// about 57.6 independent hash bits.
 ///
 /// Identity by hash is not provably exact: two different names would have to agree
 /// on all of those bits. For the spec's pool of 100,000 names that chance is about
@@ -437,10 +440,17 @@ impl Names {
         (0..len.div_ceil(8)).fold(len as u64, |h, k| mix(h, name_word(c, start, len, k)))
     }
 
+    /// The slot a name with hash `h` probes first: its low 24 bits (below the tag's)
+    /// scaled to the table's size.
+    #[inline]
+    fn first(h: u64) -> usize {
+        ((h & ID_MASK) * NAME_SLOTS as u64 >> ID_BITS) as usize
+    }
+
     /// Starts loading the slot a name with hash `h` probes first.
     #[inline]
     fn prefetch_slot(&self, h: u64) {
-        prefetch(&self.slots[h as usize & (NAME_SLOTS - 1)]);
+        prefetch(&self.slots[Names::first(h)]);
     }
 
     /// The dense id of the name with hash `h`. A thread that finds an empty slot takes
@@ -457,7 +467,7 @@ impl Names {
             static RESERVED: Cell<(u32, u32)> = const { Cell::new((0, 0)) }; // next..end
         }
         let tag = h & !ID_MASK;
-        let mut i = h as usize & (NAME_SLOTS - 1);
+        let mut i = Names::first(h);
         loop {
             let slot = &self.slots[i];
             let mut v = slot.load(Acquire);
@@ -482,7 +492,7 @@ impl Names {
             if v & !ID_MASK == tag {
                 return ((v & ID_MASK) - 1) as u32;
             }
-            i = (i + 1) & (NAME_SLOTS - 1);
+            i = if i + 1 == NAME_SLOTS { 0 } else { i + 1 };
         }
     }
 }

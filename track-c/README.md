@@ -12,7 +12,7 @@ Rust, zero dependencies, 12 threads.
 
 **Parse.** Each thread parses records straight from the map. Text fields are scanned 32 bytes per step with AVX2 (most fields end in the first step). A BOM at a record start is recognised by its first byte, since every other byte is ASCII (spec 2.2); a 3-byte `memcmp` call per record had cost 8%. Ids, region ids and amounts are converted with word arithmetic, amounts in integer cents. Name and note lengths are the raw lengths minus the `""` escapes, so no field is ever copied.
 
-**Distinct names.** Names need no unescaping: raw field bytes identify a value exactly (an unquoted field cannot contain `"`, and unescaping is one-to-one). One lock-free table shared by all threads gives each name a dense id, keyed by a folded-multiply 64-bit hash of its bytes (the FxHash step used before collided on near-duplicate names: seed 6 has `Dacom Mina` and `Dacom Maca`). Threads take fresh ids 256 at a time, since nearly all 100,000 names are first met in the run's first milliseconds. Lookups go in batches of 32 (hash and prefetch every slot, then resolve), so their cache misses overlap. Each (country, id) pair is one bit in a shared bitset; the bits are written in batches: each thread queues its pairs per shard of countries and applies 256 at a time under the shard's lock, with no locked instruction per record.
+**Distinct names.** Names need no unescaping: raw field bytes identify a value exactly (an unquoted field cannot contain `"`, and unescaping is one-to-one). One lock-free table (1.5 MB) shared by all threads gives each name a dense id, keyed by a folded-multiply 64-bit hash of its bytes (the FxHash step used before collided on near-duplicate names: seed 6 has `Dacom Mina` and `Dacom Maca`). Threads take fresh ids 256 at a time, since nearly all 100,000 names are first met in the run's first milliseconds. Lookups go in batches of 32 (hash and prefetch every slot, then resolve), so their cache misses overlap. Each (country, id) pair is one bit in a shared bitset; the bits are written in batches: each thread queues its pairs per shard of countries and applies 256 at a time under the shard's lock, with no locked instruction per record.
 
 **Build.** Fat LTO, one codegen unit, `target-cpu=x86-64-v3`, and profile-guided optimisation: `pgo.profdata` is the profile of an instrumented build of this code run on full seeds 2 and 3 (never the board's seed 1). It only steers code layout; it cannot change any output.
 
@@ -28,5 +28,5 @@ None. Standard library only. `mmap` is declared directly against the C library t
 
 ## With another 24 hours
 
-- On the box the parse and join take ~28 ms (a probe without interning) and interning ~13 ms. The interning is bound by the 2 MB shared name table; a smaller one would need a guard for seeds with more distinct names than the spec's planning pool.
+- On the box the parse and join take ~28 ms (a probe without interning) and interning ~13 ms. The interning is bound by the shared name table (1.5 MB, about half full).
 - Batching the region join with the name lookups measured 2.4% faster on the 2-CPU runner but not on the box; it may pay once the parse is cheaper.
