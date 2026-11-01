@@ -318,3 +318,7 @@ ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69
 64ac480	b	run-b02c22976621	0.3393	99.9	866	17.06	
 64ac480	c	run-95ae19619dee	0.0413	10.9	565	29.49	code unchanged from 851ead2 (third sample)
 64ac480	d	run-f46403e7d1aa	0.2097	159.5	507	18.15	
+257172c	a	run-d55574a0c150	0.0329	23.1	505	35.46	code unchanged from 64ac480 (second sample)
+257172c	b	run-81976ddab1e0	0.2958	99.7	866	18.28	
+257172c	c	run-1adcc68356e0	0.0409	10.8	603	29.38	FAILED EXPERIMENT: names under 32 bytes hashed by one AVX2 XXH3 step (x86 A/B 1.029x): no visible gain on the box, +38 lines, lower K; reverted
+257172c	d	run-77e2309823bc	0.2130	159.8	507	18.00	

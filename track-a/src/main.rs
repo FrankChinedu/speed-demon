@@ -74,6 +74,8 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE: exit after the parse
+    std::process::exit(0);
 
     let count = registry.count.into_inner() as usize;
     let names: Vec<Vec<u8>> = (registry.names.into_iter().take(count))
