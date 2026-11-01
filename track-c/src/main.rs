@@ -515,9 +515,25 @@ fn field(c: &[u8], p: usize) -> Field {
     }
 }
 
-/// Position of the first `byte` at or after `p`, eight bytes at a time.
+/// Position of the first `byte` at or after `p`: 32 bytes per step with AVX2 (the
+/// scoring box), so most fields end in the first step, and eight bytes per step by
+/// word arithmetic otherwise and near the end of the chunk.
 #[inline]
 fn find(c: &[u8], mut p: usize, byte: u8) -> usize {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    while let Some(block) = c.get(p..p + 32) {
+        use std::arch::x86_64::*;
+        // SAFETY: AVX2 is enabled at compile time, and the unaligned load reads exactly
+        // the 32 bytes of `block`.
+        let hits = unsafe {
+            let v = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(byte as i8))) as u32
+        };
+        if hits != 0 {
+            return p + hits.trailing_zeros() as usize;
+        }
+        p += 32;
+    }
     const ONES: u64 = 0x0101_0101_0101_0101;
     while let Some(w) = c.get(p..p + 8) {
         let x = u64::from_le_bytes(w.try_into().unwrap()) ^ (ONES * byte as u64);
