@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 7a33ede)
+HEAD is now at 7a33ede Track B: postings entry per BOOL term shrunk to (u16 last offset, u16 count), 214 KB instead of 428 KB, and prefetched by the tokenizer as soon as a token's slot is found (the x86 profile put ~10% of the run on that entry's miss)
+$ cargo build --release -q
+### A/B track b: base ae1dbdb vs head 7a33ede
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 937.87 | 930.62 | OK |
+| head | 954.10 | 942.56 | OK |
+
+speedup base/head 0.983, 95% CI [0.973, 0.997]: **head SLOWER**
