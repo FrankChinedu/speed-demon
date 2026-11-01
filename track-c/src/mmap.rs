@@ -43,15 +43,14 @@ pub fn map(path: &Path) -> &'static [u8] {
 /// thread allocates in its own malloc arena (or touches in a sparse table) pulls in a
 /// whole 2 MB page, and the run's peak memory is scored. Linux only; a no-op elsewhere.
 pub fn small_pages() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(target_os = "linux")]
     {
         unsafe extern "C" {
-            fn mallopt(param: i32, value: i32) -> i32;
+            fn prctl(option: i32, ...) -> i32;
         }
-        const M_ARENA_MAX: i32 = -8;
-        // EXPERIMENT: huge pages left on (fewer TLB misses on the random table lookups),
-        // with one malloc arena so threads do not each touch a fresh 2 MB arena page.
-        // SAFETY: mallopt only sets an allocator parameter, before any thread starts.
-        unsafe { mallopt(M_ARENA_MAX, 1) };
+        const PR_SET_THP_DISABLE: i32 = 41;
+        // SAFETY: prctl with PR_SET_THP_DISABLE takes one integer flag and only changes
+        // how this process's future page faults are served.
+        unsafe { prctl(PR_SET_THP_DISABLE, 1u64, 0u64, 0u64, 0u64) };
     }
 }

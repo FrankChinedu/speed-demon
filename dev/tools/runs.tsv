@@ -357,7 +357,10 @@ bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39
 87155c8	a	run-60a9f54317bb	0.0273	22.7	526	38.82
 87155c8	c	run-23f73c83ce7e	0.0413	10.8	515	29.93
 87155c8	d	run-10aabc67718c	0.2137	125.4	521	18.78	code unchanged from fe2348f
-7f10e38	a	run-aa2777b794f4	0.0267	22.4	526	39.34
+7f10e38	a	run-aa2777b794f4	0.0267	22.4	526	39.34	code of bc5e6ce (second sample)
 7f10e38	b	run-654ed82480d7	0.2917	91.7	881	18.67	per-chunk bitset of dense terms (no binary search for absent terms): 0.2917, within noise of 0.2821
-7f10e38	c	run-7a42b5487298	0.0413	10.6	515	30.06
+7f10e38	c	run-7a42b5487298	0.0413	10.6	515	30.06	FAILED EXPERIMENT (a5e47cc): huge pages left on with one malloc arena: no gain; reverted
 7f10e38	d	run-5d533060e3ff	0.0841	127.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the build: 84 ms (64 before the second parse), M 127.3, so the build sets the peak, ~24 MB above its arrays (B shows the same ~24 MB: 12 thread stacks on huge pages?)
+7a22f66	a	run-2a14d5f47cee	0.0271	22.6	526	39.00	
+7a22f66	b	run-0e13ef120e87	0.2787	91.9	882	19.09	
+7a22f66	c	run-63d2988a3db6	0.0410	10.5	515	30.26	
