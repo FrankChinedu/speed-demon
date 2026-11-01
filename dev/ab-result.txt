@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 51b0fcb)
+HEAD is now at 51b0fcb Track B: the plan stores every BOOL query's terms and every phrase's in one array each (a query holds a range: no allocation per query), and the term table starts at a capacity estimated from the file size (no rehash while filling). A box probe put parsing and filling at 18 ms of the plan's 23; locally the parse goes 7.9 -> 6.2 ms
+$ cargo build --release -q
+### A/B track b: base 318dadb vs head 51b0fcb
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V45 96-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 598.80 | 583.81 | OK |
+| head | 591.25 | 564.29 | OK |
+
+speedup base/head 1.013, 95% CI [1.002, 1.034]: **head FASTER**
