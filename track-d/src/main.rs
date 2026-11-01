@@ -1,14 +1,15 @@
 //! Track D: Traverse. Exact shortest-path distances for 2,000 (s, t) queries on a
 //! 5M-edge directed graph with non-negative u32 weights.
 //!
-//! 1. Parse the edge list twice in parallel, straight from the map: the first pass
-//!    counts out-degrees, the second writes each edge into place at an atomic cursor.
-//!    No intermediate edge list is ever materialised.
+//! 1. Parse the edge list in parallel, straight from the map: the first pass counts
+//!    each chunk's edges per bucket of 2,048 nodes, then one pass per direction writes
+//!    every edge into its bucket's range, and each bucket's rows are filled in cache.
+//!    Directions are built one after the other, so only one edge array is ever alive.
 //! 2. Layout: node ids are randomly relabelled, so every settled node is a cache miss.
-//!    Each node gets one 32-byte row holding up to four edges, aligned so it is never
-//!    split across cache lines: one miss per node, found by address arithmetic with
-//!    no offset table to read first. 97% of nodes have at most four out-edges; the
-//!    rest keep three inline and spill the others to an overflow list.
+//!    Each node gets one 16-byte row holding up to four edges of one u32 each, aligned
+//!    so it is never split across cache lines: one miss per node, found by address
+//!    arithmetic with no offset table to read first. 97% of nodes have at most four
+//!    out-edges and nearly all weights fit 11 bits; the rest spill to overflow lists.
 //! 3. Answer queries in parallel with Dijkstra that stops when t is settled. Distances
 //!    live in a small per-query hash table rather than an n-sized array per thread:
 //!    queries are local (median ~512 settled nodes), so this keeps memory near the
@@ -24,23 +25,26 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
-/// An edge in a row is one word, `(head + 1) << 32 | weight`, so an all-zero row is
-/// empty and rows can come from zeroed memory.
-const EMPTY: u64 = 0;
-/// In a row's last slot, `SPILL << 32 | bucket << 16 | offset`: the node's remaining
-/// edges are in its bucket's overflow list, as a length followed by the edges.
-const SPILL: u64 = u32::MAX as u64;
+/// An edge in a row is one u32, `(head + 1) << 11 | weight`, so an all-zero row is
+/// empty and rows can come from zeroed memory. Node ids fit 21 bits (asserted at
+/// load), and nearly every weight fits the low 11 bits.
+const W_BITS: u32 = 11;
+const W_MASK: u32 = (1 << W_BITS) - 1;
+/// A node with more than four edges, or with a weight of `W_MASK` or more, keeps all
+/// its edges in its bucket's overflow list, as full `head << 32 | weight` words. Its
+/// row is `[SPILL, bucket, offset, count]`; no real edge word is below `1 << W_BITS`.
+const SPILL: u32 = 1;
 /// The build sorts edges into buckets of 2^11 consecutive nodes.
 const BUCKET_BITS: u32 = 11;
 const LOCAL: u64 = (1 << BUCKET_BITS) - 1;
 
-/// Up to four edges of one node, in one aligned half cache line.
+/// Up to four edges of one node, in one aligned quarter cache line.
 #[derive(Clone, Copy)]
-#[repr(C, align(32))]
-struct Row([u64; 4]);
+#[repr(C, align(16))]
+struct Row([u32; 4]);
 
 /// One direction of the graph: each node's edges in its own row, plus per-bucket
-/// overflow lists for nodes with more than four.
+/// overflow lists for the nodes that do not fit one.
 struct Adjacency {
     rows: Vec<Row>,
     spill: Vec<Vec<u64>>,
@@ -83,28 +87,25 @@ impl Adjacency {
     }
 
     fn has_edges(&self, u: u32) -> bool {
-        self.rows[u as usize].0[0] != EMPTY
+        self.rows[u as usize].0[0] != 0
     }
 
     /// Calls `f(other end, weight)` for every edge of `u`.
     #[inline]
     fn for_each_edge(&self, u: u32, mut f: impl FnMut(u32, u32)) {
-        for &e in &self.rows[u as usize].0 {
-            match e >> 32 {
-                _ if e == EMPTY => return,
-                SPILL => {
-                    let (list, at) = (
-                        &self.spill[(e as u32 >> 16) as usize],
-                        (e & 0xffff) as usize,
-                    );
-                    let edges = &list[at + 1..at + 1 + list[at] as usize];
-                    edges
-                        .iter()
-                        .for_each(|&e| f((e >> 32) as u32 - 1, e as u32));
-                    return;
-                }
-                v => f(v as u32 - 1, e as u32),
+        let row = &self.rows[u as usize].0;
+        if row[0] == SPILL {
+            let (list, at) = (&self.spill[row[1] as usize], row[2] as usize);
+            (list[at..at + row[3] as usize])
+                .iter()
+                .for_each(|&e| f((e >> 32) as u32, e as u32));
+            return;
+        }
+        for &e in row {
+            if e == 0 {
+                return;
             }
+            f((e >> W_BITS) - 1, e & W_MASK);
         }
     }
 
@@ -123,29 +124,35 @@ impl Adjacency {
 
 /// Writes the rows of bucket `b` from its edges and returns its overflow list.
 fn fill_bucket(b: usize, rows: &mut [Row], edges: &[AtomicU64]) -> Vec<u64> {
+    // Per node: its degree, with the top bit set if it has a weight too wide for a row.
+    const WIDE: u32 = 1 << 31;
     let mut degree = vec![0u32; rows.len()];
-    edges
-        .iter()
-        .for_each(|e| degree[(e.load(Relaxed) >> 53) as usize] += 1);
-    let mut list = Vec::new();
-    let mut at = vec![0u32; rows.len()]; // where a spilled node's list starts
-    for (i, &d) in degree.iter().enumerate().filter(|&(_, &d)| d > 4) {
-        assert!(list.len() < 1 << 16, "overflow list too long");
-        rows[i].0[3] = SPILL << 32 | (b as u64) << 16 | list.len() as u64;
-        at[i] = list.len() as u32;
-        list.push(d as u64 - 3);
-        list.resize(list.len() + d as usize - 3, 0);
+    for e in edges.iter().map(|e| e.load(Relaxed)) {
+        let d = &mut degree[(e >> 53) as usize];
+        *d = (*d + 1) | if e as u32 >= W_MASK { WIDE } else { 0 };
     }
-    let mut used = vec![0u32; rows.len()];
+    let mut list = Vec::new();
+    for (i, &d) in degree.iter().enumerate().filter(|&(_, &d)| d > 4) {
+        let d = d & !WIDE;
+        rows[i].0 = [SPILL, b as u32, list.len() as u32, d];
+        list.resize(list.len() + d as usize, 0);
+    }
     for e in edges.iter().map(|e| e.load(Relaxed)) {
         let i = (e >> 53) as usize;
-        let slot = used[i] as usize;
-        used[i] += 1;
-        let word = ((e >> 32 & 0x1f_ffff) + 1) << 32 | (e & 0xffff_ffff);
-        match degree[i] > 4 && slot >= 3 {
-            true => list[at[i] as usize + 1 + slot - 3] = word,
-            false => rows[i].0[slot] = word,
+        let (head, w) = (e >> 32 & 0x1f_ffff, e & 0xffff_ffff);
+        let row = &mut rows[i].0;
+        if degree[i] > 4 {
+            // Fill the list back to front: `row[3]` counts down the free slots.
+            row[3] -= 1;
+            list[(row[2] + row[3]) as usize] = head << 32 | w;
+        } else {
+            let slot = row.iter().position(|&x| x == 0).unwrap();
+            row[slot] = ((head as u32 + 1) << W_BITS) | w as u32;
         }
+    }
+    // Restore the counts that the fill used as cursors.
+    for (i, &d) in degree.iter().enumerate().filter(|&(_, &d)| d > 4) {
+        rows[i].0[3] = d & !WIDE;
     }
     list
 }
@@ -261,26 +268,24 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         starts[buckets] = total;
     }
 
-    // Pass 2: each edge goes to its bucket in both directions. A chunk writes only
+    // Pass 2, once per direction: each edge goes to its bucket. A chunk writes only
     // its own ranges, as about a thousand sequential streams instead of random words.
+    // The text is parsed again for the second direction so that only one edge array
+    // (8 bytes per edge) is ever alive: memory, not time, decides this.
     let m = starts[0][buckets];
-    let edges: [Vec<AtomicU64>; 2] = [zeroed(m), zeroed(m)];
-    for_each_chunk(&chunks, threads, |k, chunk| {
-        let [out, into] = &mut *counts[k].lock().unwrap();
-        for_each_line(chunk, |u, v, w| {
-            let (u, v, w) = (u as u64, v as u64, w as u64);
-            let (bo, bi) = (u as usize >> BUCKET_BITS, v as usize >> BUCKET_BITS);
-            edges[0][out[bo]].store((u & LOCAL) << 53 | v << 32 | w, Relaxed);
-            edges[1][into[bi]].store((v & LOCAL) << 53 | u << 32 | w, Relaxed);
-            (out[bo], into[bi]) = (out[bo] + 1, into[bi] + 1);
+    let [out, into] = [0, 1].map(|dir| {
+        let edges: Vec<AtomicU64> = zeroed(m);
+        for_each_chunk(&chunks, threads, |k, chunk| {
+            let cursor = &mut counts[k].lock().unwrap()[dir];
+            for_each_line(chunk, |u, v, w| {
+                let (t, h) = if dir == 0 { (u, v) } else { (v, u) };
+                let b = t as usize >> BUCKET_BITS;
+                edges[cursor[b]].store((t as u64 & LOCAL) << 53 | (h as u64) << 32 | w as u64, Relaxed);
+                cursor[b] += 1;
+            });
         });
+        Adjacency::build(&edges, &starts[dir], n, threads)
     });
-
-    // Rows, one direction at a time, freeing each edge array once it is built.
-    let [out_edges, into_edges] = edges;
-    let out = Adjacency::build(&out_edges, &starts[0], n, threads);
-    drop(out_edges);
-    let into = Adjacency::build(&into_edges, &starts[1], n, threads);
     Graph { out, into }
 }
 
