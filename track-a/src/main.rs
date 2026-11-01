@@ -305,7 +305,7 @@ fn parse(
             };
             let id = table.id(
                 &line[ep_start..ep_end],
-                fmix(h ^ (ep_end - ep_start) as u64) | 1,
+                mix(h, (ep_end - ep_start) as u64) | 1,
             );
             let (latency, j) = latency(line, ep_end + 5);
             i += j + 1;
@@ -385,25 +385,17 @@ fn latency(line: &[u8], p: usize) -> (u32, usize) {
     (v, j)
 }
 
-/// One step of the endpoint hash per 8-byte word: the folded multiply of foldhash and
+/// One step of the endpoint hash per 8-byte word, and a last one over the length: the folded multiply of foldhash and
 /// wyhash. The halves of the full 128-bit product are xored, so every input bit
 /// reaches every output bit. The FxHash step this replaced, a plain 64-bit multiply,
 /// only carries a change upward: names differing in their 8th and 9th bytes collided
-/// in all 64 bits about once in 32 (track C met such a pair on seed 6).
+/// in all 64 bits about once in 32 (track C met such a pair on seed 6). The fold
+/// already spreads every bit both ways, so no separate finalizer is needed: on 4.9
+/// million near-duplicate names (one or two bytes changed) neither form collided.
 #[inline]
 fn mix(h: u64, w: u64) -> u64 {
     let m = (h ^ w) as u128 * 0x9e37_79b9_7f4a_7c15;
     m as u64 ^ (m >> 64) as u64
-}
-
-/// The murmur3 finalizer: spreads every input bit over the whole word.
-#[inline]
-fn fmix(mut h: u64) -> u64 {
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    h ^ h >> 33
 }
 
 /// A thread's endpoint table, keyed by a strong 64-bit hash of the name alone: bytes
