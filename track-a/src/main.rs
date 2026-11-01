@@ -243,7 +243,7 @@ fn parse(
 ) -> Vec<Hour> {
     let mut buf = vec![0u8; CHUNK + SLACK + 1];
     let mut table = Endpoints {
-        slots: vec![(0, 0); 2 * MAX_ENDPOINTS],
+        slots: vec![0; 2 * MAX_ENDPOINTS],
         registry,
     };
     let mut hours: Vec<Hour> = (0..HOURS).map(|_| Hour::default()).collect();
@@ -470,12 +470,18 @@ fn mix(h: u64, w: u64) -> u64 {
     m as u64 ^ (m >> 64) as u64
 }
 
-/// A thread's endpoint table, keyed by a strong 64-bit hash of the name alone: bytes
-/// are never compared on the hot path. Two of the 1,842 names sharing a hash has odds
-/// of about 1e-13 per run. New names take a global id from the shared registry, which
-/// does compare bytes, so a collision between names it sees is caught.
+/// Slots are `tag | id`: the id in the low bits, hash bits 11..63 above it.
+const ID_MASK: u64 = MAX_ENDPOINTS as u64 - 1;
+
+/// A thread's endpoint table, keyed by hash alone: bytes are never compared on the hot
+/// path. A slot is one word, the hash's top 53 bits above the id, so the 4,096 slots
+/// take 32 KB and stay in L1. With the 12 bits that pick the first slot, a name is
+/// identified by 61 hash bits (bit 63 is forced, so a tag is never an empty slot):
+/// two of the 1,842 names sharing them has odds of about 1e-12 per run. New names
+/// take a global id from the shared registry, which compares bytes, so a full 64-bit
+/// collision between names it sees is caught.
 struct Endpoints<'a> {
-    slots: Vec<(u64, u32)>, // (hash, id); hash 0 marks an empty slot
+    slots: Vec<u64>, // 0 marks an empty slot
     registry: &'a Mutex<Registry>,
 }
 
@@ -483,13 +489,14 @@ impl Endpoints<'_> {
     #[inline]
     fn id(&mut self, name: &[u8], h: u64) -> u32 {
         let mask = self.slots.len() - 1;
+        let tag = (h | 1 << 63) & !ID_MASK;
         let mut i = h as usize & mask;
         loop {
-            let (sh, id) = self.slots[i];
-            if sh == h {
-                return id;
+            let slot = self.slots[i];
+            if slot & !ID_MASK == tag {
+                return (slot & ID_MASK) as u32;
             }
-            if sh == 0 {
+            if slot == 0 {
                 break;
             }
             i = (i + 1) & mask;
@@ -511,7 +518,7 @@ impl Endpoints<'_> {
                 id
             }
         };
-        self.slots[i] = (h, id);
+        self.slots[i] = tag | id as u64;
         id
     }
 }

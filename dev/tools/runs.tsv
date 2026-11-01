@@ -298,3 +298,7 @@ fdec699	d	run-2f12c7554728	0.1958	160.0	507	18.77
 27a96ae	b	run-185ea3f60c5f	0.2956	100.1	866	18.27	
 27a96ae	c	run-fdce8690114a	0.0452	10.6	569	28.30	name ids reserved 256 at a time per thread; one-byte region table: M 10.6 MB
 27a96ae	d	run-1e003f39f112	0.1963	159.7	507	18.75	
+635fc59	a	run-4c24db345b4c	0.0387	24.1	500	32.50	endpoint found by one AVX2 space mask, XXH3-style hash (x86 A/B 1.055x)
+635fc59	b	run-701c97feca30	0.2965	99.5	866	18.26	
+635fc59	c	run-c0c4da44881b	0.0448	11.1	569	28.16	code unchanged from 27a96ae
+635fc59	d	run-93ac1b2f093e	0.1936	159.8	507	18.88	
