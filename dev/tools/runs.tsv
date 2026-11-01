@@ -261,3 +261,12 @@ e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
 3dfa93b	b	run-1163796d5990	0.2963	100.2	866	18.24	
 3dfa93b	c	run-dfda535984a0	0.0550	11.3	506	25.79	AVX2 field scan, 32 bytes per step
 3dfa93b	d	run-c59ab0a59c9f	0.2046	159.6	507	18.37	
+babcf41	a	run-ea14c4ddb000	0.0410	24.1	450	32.05	probe reverted: pread version of 8c6f070
+babcf41	b	run-f14bc77f4aab	0.2973	99.2	866	18.25	
+babcf41	c	run-39e8f2e48db0	0.0554	11.3	506	25.69	AVX2 field scan, second run (code of 3dfa93b)
+babcf41	d	run-82c7aa6d5d87	0.1951	160.2	507	18.80	
+7dbbf8a	b	run-00acb9fbd483	0.2976	99.9	866	18.22	
+7dbbf8a	d	run-f62b337d417d	0.2448	159.5	507	16.80	
+3dfa93b	a	run-42cd2466289d	0.0086	7.7	-	-	TIMING PROBE (fails the hash on purpose): only preads the whole input in 128 KB chunks in parallel (the mmap read-only probe was 9.9 ms)
+7dbbf8a	a	run-7b5957e0df3e	0.0299	20.3	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse (pread version): phase 2 is about 11 ms
+7dbbf8a	c	run-7bbabded3017	0.0361	7.5	-	-	TIMING PROBE (fails the hash on purpose): names hashed, no table lookup, no bitset: lookup plus bitset cost about 19 ms
