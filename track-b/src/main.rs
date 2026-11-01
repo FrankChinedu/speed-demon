@@ -65,8 +65,9 @@ struct Plan {
     /// Each phrase is checked only where its key term occurs: the phrase's term used
     /// by the fewest queries, a proxy for the rarest in the corpus (almost every
     /// phrase is built around a rare anchor). A term's keyed phrases, with the key's
-    /// position inside each, are the `keyed` range in its info record.
+    /// position inside each, are `keyed[key_first[id]..key_first[id + 1]]`.
     keyed: Vec<(u32, u32)>,
+    key_first: Vec<u32>,
 }
 
 /// Posting sets of the BOOL terms for one chunk of documents, as offsets from `base`.
@@ -258,16 +259,17 @@ fn main() {
                             // becomes the term id the phrase check compares.
                             for (i, t) in ids.iter_mut().enumerate().filter(|(_, t)| **t != NONE) {
                                 let s = &plan.terms.slots[*t as usize];
-                                let (b, key_lo, key_hi) = (s.bool_index, s.key_lo, s.key_hi);
+                                let b = s.info & !KEYED;
                                 *t = s.id;
-                                if b != NONE && last[b as usize] != doc {
+                                if b != NO_BOOL && last[b as usize] != doc {
                                     last[b as usize] = doc;
                                     postings.count[b as usize] += 1;
                                     postings.groups[b as usize >> postings.shift]
                                         .push(offset << 16 | b);
                                 }
-                                if key_lo != key_hi {
-                                    keys.push((i as u32, key_lo, key_hi));
+                                if s.info & KEYED != 0 {
+                                    let k = &plan.key_first[s.id as usize..];
+                                    keys.push((i as u32, k[0], k[1]));
                                 }
                             }
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
@@ -285,8 +287,6 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed
@@ -524,7 +524,10 @@ fn plan(text: &'static [u8]) -> Plan {
     }
     for s in terms.slots.iter_mut().filter(|s| s.hash != 0) {
         let t = s.id as usize;
-        (s.bool_index, s.key_lo, s.key_hi) = (bool_index[t], key_first[t], key_first[t + 1]);
+        s.info = bool_index[t].min(NO_BOOL);
+        if key_first[t] != key_first[t + 1] {
+            s.info |= KEYED;
+        }
     }
     Plan {
         terms,
@@ -535,6 +538,7 @@ fn plan(text: &'static [u8]) -> Plan {
         queries,
         phrases,
         keyed,
+        key_first,
     }
 }
 
@@ -631,17 +635,20 @@ static KEEP: [u8; 64] = {
 /// are a few word operations instead of a byte loop and a `memcmp` through a pointer.
 type Key = [u64; 4];
 
-/// Everything a corpus token needs, in one 32-byte slot: the term's hash, its id, its
-/// dense BOOL index (or NONE) and the range of phrases keyed on it.
+/// Everything a corpus token needs, in one 16-byte slot: the term's hash, its id, and
+/// `info`, its dense BOOL index (or NO_BOOL) with the KEYED bit set if phrases are
+/// keyed on it. Four slots share a cache line, so the 69,000 terms of a full query set
+/// take 2 MB.
 #[derive(Clone, Copy, Default)]
-#[repr(C, align(32))]
+#[repr(C, align(16))]
 struct Slot {
     hash: u64,
     id: u32,
-    bool_index: u32,
-    key_lo: u32,
-    key_hi: u32,
+    info: u32,
 }
+
+const KEYED: u32 = 1 << 31;
+const NO_BOOL: u32 = KEYED - 1;
 
 /// Open-addressing table from query terms to their slots, built once, read by every
 /// thread. Terms are identified by a strong 64-bit hash of their bytes, so a lookup
@@ -671,13 +678,13 @@ impl Terms {
         }
     }
 
-    /// The id of `key`, adding it if it is new. Grows at half full.
+    /// The id of `key`, adding it if it is new. Grows at 60% full.
     fn insert(&mut self, key: Key) -> u32 {
         let h = hash(&key);
         if let Some(i) = self.find(h) {
             return self.slots[i].id;
         }
-        if (self.count as usize + 1) * 2 > self.slots.len() {
+        if (self.count as usize + 1) * 5 > self.slots.len() * 3 {
             let old = std::mem::replace(self, Terms::with_capacity(self.slots.len() * 2));
             self.count = old.count;
             for s in old.slots.into_iter().filter(|s| s.hash != 0) {
@@ -687,8 +694,7 @@ impl Terms {
         self.place(Slot {
             hash: h,
             id: self.count,
-            bool_index: NONE,
-            ..Slot::default()
+            info: NO_BOOL,
         });
         self.count += 1;
         self.count - 1
