@@ -328,7 +328,7 @@ impl Shared<'_> {
 
 fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut [Vec<u32>]) {
     let unmatched = (aggs.len() - 1) as u16;
-    let mut batch = [(0, 0, 0); BATCH];
+    let mut batch = [(0, 0); BATCH];
     let mut n = 0;
     let mut p = 0;
     if first {
@@ -361,14 +361,18 @@ fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut 
         a.name_bytes += (name.len() - name.escapes) as u64;
         a.note_bytes += (note.len() - note.escapes) as u64;
 
-        batch[n] = (g, name.start, name.end_content);
+        // Hash the name and start loading its slot now: the hash does not depend on the
+        // parse of the next record, so the core overlaps the two.
+        let h = Names::hash(c, name.start, name.len());
+        shared.names.prefetch_slot(h);
+        batch[n] = (g, h);
         n += 1;
         if n == BATCH {
-            intern(c, &batch, shared, queues);
+            intern(&batch, shared, queues);
             n = 0;
         }
     }
-    intern(c, &batch[..n], shared, queues);
+    intern(&batch[..n], shared, queues);
 }
 
 /// Records per interning batch.
@@ -378,13 +382,8 @@ const BATCH: usize = 32;
 /// marked seen. Every lookup is a likely cache miss into the shared name table, so
 /// they go in two passes: hash and prefetch every slot, then resolve the ids. The
 /// misses of one pass overlap instead of each record waiting for its own.
-fn intern(c: &[u8], batch: &[(usize, usize, usize)], shared: &Shared, queues: &mut [Vec<u32>]) {
-    let mut hashes = [0u64; BATCH];
-    for (h, &(_, start, end)) in hashes.iter_mut().zip(batch) {
-        *h = Names::hash(c, start, end - start);
-        shared.names.prefetch_slot(*h);
-    }
-    for (&h, &(g, ..)) in hashes.iter().zip(batch) {
+fn intern(batch: &[(usize, u64)], shared: &Shared, queues: &mut [Vec<u32>]) {
+    for &(g, h) in batch {
         shared.insert(queues, g, shared.names.id(h));
     }
 }
