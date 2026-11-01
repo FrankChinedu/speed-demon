@@ -189,6 +189,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
+    mmap::return_freed_buffers();
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
@@ -407,11 +408,12 @@ impl Search {
 /// Monotone priority queue for Dijkstra: keys pushed are never below the last key
 /// popped. Bucket i holds keys whose highest bit differing from that last key is
 /// bit i - 1 (bucket 0: equal to it), so a push is O(1) and every element moves to a
-/// lower bucket at most 64 times over its life.
+/// lower bucket at most 64 times over its life. An element is one word,
+/// `key << 21 | node`: keys are distances below 2^43 (asserted by the distance map).
 struct RadixHeap {
     last: u64,
     len: usize,
-    buckets: [Vec<(u64, u32)>; 65],
+    buckets: [Vec<u64>; 65],
 }
 
 impl Default for RadixHeap {
@@ -440,7 +442,7 @@ impl RadixHeap {
     #[inline]
     fn push(&mut self, key: u64, node: u32) {
         let b = self.bucket(key);
-        self.buckets[b].push((key, node));
+        self.buckets[b].push(key << 21 | node as u64);
         self.len += 1;
     }
 
@@ -451,10 +453,10 @@ impl RadixHeap {
             // Move the lowest non-empty bucket down around its smallest key.
             let i = self.buckets.iter().position(|b| !b.is_empty())?;
             let moved = std::mem::take(&mut self.buckets[i]);
-            self.last = moved.iter().map(|&(k, _)| k).min().unwrap();
-            for &(k, v) in &moved {
-                let b = self.bucket(k);
-                self.buckets[b].push((k, v));
+            self.last = moved.iter().min().unwrap() >> 21;
+            for &e in &moved {
+                let b = self.bucket(e >> 21);
+                self.buckets[b].push(e);
             }
             self.buckets[i] = moved;
             self.buckets[i].clear();
@@ -466,7 +468,8 @@ impl RadixHeap {
     fn pop(&mut self) -> Option<(u64, u32)> {
         self.peek()?;
         self.len -= 1;
-        self.buckets[0].pop()
+        let e = self.buckets[0].pop()?;
+        Some((e >> 21, e as u32 & 0x1f_ffff))
     }
 }
 

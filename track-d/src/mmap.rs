@@ -38,3 +38,20 @@ pub fn map(path: &Path) -> &'static [u8] {
     // SAFETY: the mapping is valid for `len` bytes and lives until the process exits.
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
+
+/// Makes glibc serve every allocation of 128 KB or more as its own mapping, returned to
+/// the OS when freed. By default glibc raises that threshold after the first large
+/// free, so a search map that doubles leaves its old buffer charged to us in the
+/// thread's arena. Call before any thread starts. A no-op off Linux.
+pub fn return_freed_buffers() {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_MMAP_THRESHOLD: i32 = -3;
+        // SAFETY: mallopt only sets an allocator tuning parameter, and runs before
+        // any thread is started.
+        unsafe { mallopt(M_MMAP_THRESHOLD, 128 << 10) };
+    }
+}
