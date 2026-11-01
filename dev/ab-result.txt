@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 0297d50)
+HEAD is now at 0297d50 Track B: the plan in parallel: each thread parses a piece of queries.txt into flat arrays (no allocation per query, the threads share one malloc arena), the distinct terms go into a lock-free set (a term's id is its rank among the filled slots), and term hashes become ids in parallel. A box probe put the serial plan at 23 ms (~9% of the run)
+$ cargo build --release -q
+### A/B track b: base 35887e4 vs head 0297d50
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 876.40 | 866.97 | OK |
+| head | 959.80 | 953.33 | OK |
+
+speedup base/head 0.913, 95% CI [0.903, 0.923]: **head SLOWER**
