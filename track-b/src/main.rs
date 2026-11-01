@@ -820,16 +820,20 @@ impl Terms {
     }
 }
 
-/// A strong 64-bit hash of a token's key: a multiply-xor of its words, then a full
-/// avalanche (MurmurHash3's finaliser). Never 0, which marks an empty slot.
+/// A strong 64-bit hash of a token's key: three folded 64x64 -> 128-bit multiplies
+/// (wyhash's mixing step), two over the key's words and one to combine them. Every
+/// constant has a byte of 0x80 or more and key bytes never do, so no multiplier is
+/// ever zero. Never 0, which marks an empty slot.
 #[inline]
 fn hash(k: &Key) -> u64 {
-    let mut h = (k[0].wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ k[1].rotate_left(23).wrapping_mul(0xc2b2_ae3d_27d4_eb4f))
-        ^ (k[2] ^ k[3].rotate_left(41)).wrapping_mul(0x1656_67b1_9e37_79f9);
-    h = (h ^ h >> 33).wrapping_mul(0xff51_afd7_ed55_8ccd);
-    h = (h ^ h >> 33).wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    (h ^ h >> 33) | 1
+    #[inline(always)]
+    fn fold(a: u64, b: u64) -> u64 {
+        let p = a as u128 * b as u128;
+        p as u64 ^ (p >> 64) as u64
+    }
+    let a = fold(k[0] ^ 0xa076_1d64_78bd_642f, k[1] ^ 0xe703_7ed1_a0b4_28db);
+    let b = fold(k[2] ^ 0x8ebc_6af0_9c88_c6e3, k[3] ^ 0x5899_65cc_7537_4cc3);
+    fold(a ^ 0x1d8e_4e27_c47d_124f, b ^ 0xeb44_acca_b455_d165) | 1
 }
 
 /// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order.
