@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ffbc9b1)
+HEAD is now at ffbc9b1 Track B: chunk index allocated per chunk again (exact sizes) instead of reused per thread: reused buffers kept each thread's largest index alive, +5 MB on the box (80.7 -> 85.5/86.1); the side-by-side last document and count stay (x86 A/B of both together: 1.020x). Local Docker memory.peak 74 -> 66 MB
+$ cargo build --release -q
+### A/B track b: base 9327878 vs head ffbc9b1
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1046.58 | 1037.45 | OK |
+| head | 1045.46 | 1037.03 | OK |
+
+speedup base/head 1.001, 95% CI [0.992, 1.009]: **no clear difference**
