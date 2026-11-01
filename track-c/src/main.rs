@@ -330,12 +330,7 @@ fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut 
     let unmatched = (aggs.len() - 1) as u16;
     let mut batch = [(0, 0, 0); BATCH];
     let mut n = 0;
-    let mut p = 0;
-    if first {
-        // The header is the first record: skip it, with the file's leading BOM.
-        p = after_lf(c, 0);
-    }
-    while p < c.len() {
+    let mut record = |mut p: usize| {
         // Every byte but a BOM's is ASCII (spec 2.2), so 0xEF at a record start is one.
         if c[p] == BOM[0] {
             p += 3;
@@ -344,9 +339,7 @@ fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut 
         let name = field(c, next + 1);
         let note = field(c, name.end + 1);
         let (region_id, next) = digits(c, note.end + 1);
-        let (cents, next) = amount(c, next + 1);
-        // Past the LF or CRLF (or past the end, if the last record has no terminator).
-        p = next + 1 + (c.get(next) == Some(&b'\r')) as usize;
+        let (cents, _) = amount(c, next + 1);
 
         let g = shared
             .region
@@ -367,8 +360,67 @@ fn parse(c: &[u8], first: bool, shared: &Shared, aggs: &mut [Agg], queues: &mut 
             intern(c, &batch, shared, queues);
             n = 0;
         }
+    };
+    // Parsing one record is a chain of dependent field scans, so the starts of the
+    // records ahead are found first, about 4 KB at a time, by a cheap pass over masks:
+    // an LF ends a record unless it is inside quotes, and inside quotes is the parity
+    // of the quotes before it (a quote inside a quoted field is always doubled, and an
+    // unquoted field has none). With every start known, the core overlaps records.
+    let mut p = if first { after_lf(c, 0) } else { 0 }; // the header is skipped
+    let (mut scan, mut inside, mut starts) = (p, 0u64, Vec::with_capacity(128));
+    while p < c.len() {
+        starts.clear();
+        while scan < c.len() && starts.len() < 64 {
+            let (quotes, lfs) = masks(c, scan);
+            let mut parity = quotes;
+            for k in [1, 2, 4, 8, 16, 32] {
+                parity ^= parity << k;
+            }
+            parity ^= inside;
+            inside = 0u64.wrapping_sub(parity >> 63); // all ones while a quote is open
+            let mut ends = lfs & !parity;
+            while ends != 0 {
+                starts.push(scan + ends.trailing_zeros() as usize + 1);
+                ends &= ends - 1;
+            }
+            scan += 64;
+        }
+        if scan >= c.len() && starts.last() != Some(&c.len()) {
+            starts.push(c.len()); // the last record may have no terminator
+        }
+        for &next in &starts {
+            record(p);
+            p = next;
+        }
     }
     intern(c, &batch[..n], shared, queues);
+}
+
+/// Bit masks of the quotes and the LFs in the 64 bytes at `p` (none past the end).
+#[inline]
+fn masks(c: &[u8], p: usize) -> (u64, u64) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    if let Some(block) = c.get(p..p + 64) {
+        use std::arch::x86_64::*;
+        // SAFETY: AVX2 is enabled at compile time, and the two unaligned loads read
+        // exactly the 64 bytes of `block`.
+        return unsafe {
+            let v = [0, 32].map(|k| _mm256_loadu_si256(block.as_ptr().add(k) as *const __m256i));
+            let bits = |b: u8| {
+                let m = v
+                    .map(|v| _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b as i8))));
+                m[0] as u32 as u64 | (m[1] as u32 as u64) << 32
+            };
+            (bits(b'"'), bits(b'\n'))
+        };
+    }
+    let tail = &c[p.min(c.len())..];
+    (tail.iter().take(64).enumerate()).fold((0, 0), |(q, l), (k, &b)| {
+        (
+            q | ((b == b'"') as u64) << k,
+            l | ((b == b'\n') as u64) << k,
+        )
+    })
 }
 
 /// Records per interning batch.
