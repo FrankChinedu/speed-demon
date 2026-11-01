@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ad4033a)
+HEAD is now at ad4033a Track B: the term lookup returns each token's BOOL index and keyed flag with its slot, so the postings loop reads them in order instead of reloading the table entry
+$ cargo build --release -q
+### A/B track b: base 23af08c vs head ad4033a
+15 runs each, alternating; 2 CPUs, AMD EPYC 9V74 80-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 721.96 | 719.56 | OK |
+| head | 717.22 | 713.63 | OK |
+
+speedup base/head 1.007, 95% CI [0.993, 1.012]: **no clear difference**
