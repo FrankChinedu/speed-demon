@@ -127,6 +127,8 @@ fn main() {
             });
         }
     });
+    // Every line is written: skip freeing what is left, the kernel takes it all back.
+    std::process::exit(0);
 }
 
 /// One summarizing thread's buffers, reused from hour to hour.
