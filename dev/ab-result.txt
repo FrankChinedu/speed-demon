@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ae67c60)
+HEAD is now at ae67c60 Track B: bitmaps for terms in more than 1/256 of a chunk's documents
+$ cargo build --release -q
+### A/B track b: base 63c2495 vs head ae67c60
+15 runs each, alternating; 2 CPUs, INTEL(R) XEON(R) PLATINUM 8573C
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1189.31 | 1150.48 | OK |
+| head | 1241.67 | 1218.32 | OK |
+
+speedup base/head 0.958, 95% CI [0.934, 0.976]: **head SLOWER**
