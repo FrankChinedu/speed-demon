@@ -505,3 +505,7 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 0c5d410	b	run-17e3636ad8a6	0.3422	40.8	1011	19.55	EXPERIMENT: six threads (one per core): 0.3422, M 40.8: SMT pays (the lookups are latency-bound); back to twelve
 0c5d410	c	run-a9d7072e3b58	0.0414	10.7	529	29.84	
 0c5d410	d	run-36d13a536ceb	0.2594	127.2	541	16.91	code unchanged from 6753993
+99ef432	a	run-83ea541d4776	0.0271	21.8	522	39.36	
+99ef432	b	run-8a587ccf5560	0.2453	45.2	1012	22.97	EXPERIMENT: shared summaries aligned to one cache line each: 0.2453, M 45.2: within noise of 0.2429; reverted
+99ef432	c	run-0dda2658cd80	0.0439	11.0	529	28.83	
+99ef432	d	run-03ee74d53a4e	0.2076	127.0	541	18.91	code unchanged from 6753993
