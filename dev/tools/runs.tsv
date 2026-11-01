@@ -346,3 +346,7 @@ dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53
 8172e57	b	run-dccd8c8be24a	0.3002	99.6	866	18.15	
 8172e57	d	run-7f4365276cfb	0.2365	160.0	507	17.08	
 8172e57	c	run-4af1957f0861	0.0031	7.9	-	-	TIMING PROBE (fails the hash on purpose): exits after loading regions.csv: 3.1 ms of serial start-up
+6de5579	a	run-b995a9c9a120	0.0277	22.4	570	38.20	code unchanged from 022abb8 (third sample)
+6de5579	b	run-b26536ac6174	0.3017	99.6	866	18.10	
+6de5579	c	run-216886e90743	0.0425	11.0	608	28.67	FAILED EXPERIMENT: regions.csv loaded by all threads in two passes: no gain (two more thread spawns cost what it saved), +41 lines; reverted
+6de5579	d	run-53e8f5ff6885	0.1967	159.7	507	18.73	

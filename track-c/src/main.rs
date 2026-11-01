@@ -35,6 +35,7 @@ fn mix(h: u64, w: u64) -> u64 {
 }
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
+const NO_REGION: u16 = u16::MAX;
 /// Name table slots. The spec's name pool is 100,000 values; the table stays under half full.
 const NAME_SLOTS: usize = 1 << 18;
 /// Name ids that get a bit in each country's bitset (the spec's pool is 100,000).
@@ -80,11 +81,11 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
+    let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")));
+    let records = mmap::map(&data.join("records.csv"));
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);
-    let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")), threads);
-    let records = mmap::map(&data.join("records.csv"));
     let groups = codes.len() + 1; // the last group is _UNMATCHED
 
     let names = Names::new();
@@ -141,16 +142,19 @@ fn main() {
         set + overflow.iter().filter(|&&(og, _)| og == g).count() as u32
     };
 
-    // Countries are numbered in code order, and codes are [A-Z]{3}, all below `_`, so
-    // _UNMATCHED, the last group, is also the last line.
+    // Country codes are [A-Z]{3}, all below `_`, so _UNMATCHED stays last.
+    let mut order: Vec<usize> = (0..codes.len()).collect();
+    order.sort_unstable_by_key(|&g| codes[g]);
+    order.push(codes.len());
+
     let mut buf = Vec::with_capacity(groups * 80);
-    for g in 0..groups {
+    for g in order {
         let a = &aggs[g];
         if a.count == 0 {
             continue;
         }
         buf.extend_from_slice(if g < codes.len() {
-            &codes[g]
+            codes[g]
         } else {
             b"_UNMATCHED"
         });
@@ -197,99 +201,48 @@ impl Regions {
 }
 
 /// regions.csv: `region_id,country` lines after a header, ids ascending, codes
-/// `[A-Z]{3}`. Returns the distinct country codes, in byte order, and the region
-/// table. The lines are split among the threads and read twice: once to find which
-/// codes occur (a code's base-26 key orders like its bytes, so numbering the keys in
-/// order numbers the countries in output order), then to fill the table, each piece
-/// its own run of ids (they ascend).
-fn load_regions(text: &'static [u8], threads: usize) -> (Vec<[u8; 3]>, Regions) {
-    let body = &text[text
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(text.len(), |i| i + 1)..];
-    let mut cuts = vec![0];
-    for k in 1..threads {
-        let guess = (body.len() * k / threads).max(*cuts.last().unwrap());
-        cuts.push(
-            (body[guess..].iter().position(|&b| b == b'\n')).map_or(body.len(), |i| guess + i + 1),
-        );
-    }
-    cuts.push(body.len());
-    let pieces: Vec<&[u8]> = cuts.windows(2).map(|w| &body[w[0]..w[1]]).collect();
-    let used = thread::scope(|s| {
-        let found: Vec<_> = (pieces.iter())
-            .map(|&piece| {
-                s.spawn(move || {
-                    let mut used = vec![false; 26 * 26 * 26];
-                    each_region(piece, |_, key| used[key] = true);
-                    used
-                })
-            })
-            .map(|h| h.join().unwrap())
-            .collect();
-        (0..26 * 26 * 26)
-            .map(|k| found.iter().any(|u| u[k]))
-            .collect::<Vec<_>>()
-    });
-    let mut by_code = vec![0u16; 26 * 26 * 26];
-    let mut codes = Vec::new();
-    for key in (0..used.len()).filter(|&k| used[k]) {
-        by_code[key] = codes.len() as u16;
-        codes.push([key / 676, key / 26 % 26, key % 26].map(|d| b'A' + d as u8));
-    }
-    // One byte per id while index 255 is free to mean "no region".
-    let wide = codes.len() >= 0xFF;
-    let first_id = |piece: &[u8]| (!piece.is_empty()).then(|| digits(piece, 0).0 as usize);
+/// `[A-Z]{3}`. Returns the distinct country codes and the region table. Codes index
+/// a 26^3 table directly, so there is no hashing.
+fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Regions) {
+    let mut codes: Vec<&[u8]> = Vec::new();
+    let mut by_code = vec![NO_REGION; 26 * 26 * 26];
     // Ids ascend, so the last line holds the largest: size the table once.
-    let n = body
-        .strip_suffix(b"\n")
-        .filter(|b| !b.is_empty())
-        .map_or(0, |b| {
-            digits(b, b.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1)).0 as usize + 1
-        });
+    let body = text.strip_suffix(b"\n").unwrap_or(text);
+    let last = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let n = digits(body, last).0 as usize + 1;
     let mut region = Regions {
         lo: vec![0xFF; n],
-        hi: vec![0xFF; if wide { n } else { 0 }],
+        hi: Vec::new(),
     };
-    thread::scope(|s| {
-        let (mut lo, mut hi, mut from) = (&mut region.lo[..], &mut region.hi[..], 0);
-        for (k, &piece) in pieces.iter().enumerate() {
-            let to = pieces[k + 1..]
-                .iter()
-                .find_map(|p| first_id(p))
-                .unwrap_or(n);
-            let (mine, rest) = lo.split_at_mut(to - from);
-            lo = rest;
-            let (mine_hi, rest) = hi.split_at_mut(if wide { to - from } else { 0 });
-            hi = rest;
-            let by_code = &by_code;
-            s.spawn(move || {
-                each_region(piece, |id, key| {
-                    let g = by_code[key];
-                    mine[id - from] = g as u8;
-                    if wide {
-                        mine_hi[id - from] = (g >> 8) as u8;
-                    }
-                })
-            });
-            from = to;
+    let mut p = text
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(text.len(), |i| i + 1);
+    while p + 4 < text.len() {
+        let (id, comma) = digits(text, p);
+        let code = &text[comma + 1..comma + 4];
+        let key = code.iter().fold(0, |k, &b| k * 26 + (b - b'A') as usize);
+        if by_code[key] == NO_REGION {
+            if codes.len() == 0xFF {
+                // Index 255 would read as "no region": widen. Ids without a region
+                // become 0xFFFF, the others keep a zero high byte.
+                region.hi = region
+                    .lo
+                    .iter()
+                    .map(|&l| if l == 0xFF { 0xFF } else { 0 })
+                    .collect();
+            }
+            by_code[key] = codes.len() as u16;
+            codes.push(code);
         }
-    });
-    (codes, region)
-}
-
-/// Calls `f(region id, code key)` for each whole `region_id,country` line of `piece`.
-fn each_region(piece: &[u8], mut f: impl FnMut(usize, usize)) {
-    let mut p = 0;
-    while p < piece.len() {
-        let (id, comma) = digits(piece, p);
-        let code = &piece[comma + 1..comma + 4];
-        f(
-            id as usize,
-            code.iter().fold(0, |k, &b| k * 26 + (b - b'A') as usize),
-        );
+        let g = by_code[key];
+        region.lo[id as usize] = g as u8;
+        if !region.hi.is_empty() {
+            region.hi[id as usize] = (g >> 8) as u8;
+        }
         p = comma + 5;
     }
+    (codes, region)
 }
 
 /// Splits the file into `n` chunks that each start at a record boundary.
