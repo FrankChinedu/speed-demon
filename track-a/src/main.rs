@@ -91,7 +91,7 @@ struct Hour {
 struct Writer {
     next: usize,
     done: Vec<Option<Vec<u8>>>,
-    file: File,
+    busy: bool, // a thread is writing hours, outside the lock
 }
 
 fn main() {
@@ -111,10 +111,11 @@ fn main() {
     let cap = len / 39 + (threads + 1) * BLOCK;
     let records: Vec<Records> = (0..HOURS).map(|_| Records::new(cap)).collect();
     let by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
+    let file = File::create(out.join("summary.txt")).expect("create summary.txt");
     let writer = Mutex::new(Writer {
         next: 0,
         done: vec![None; HOURS],
-        file: File::create(out.join("summary.txt")).expect("create summary.txt"),
+        busy: false,
     });
     // One set of threads for both phases: starting a second set, and each thread's
     // exit unmapping its stack (a TLB shootdown on every core), costs more than the
@@ -126,6 +127,7 @@ fn main() {
         for _ in 0..threads {
             let (input, next, registry, records) = (&input, &next, &registry, &records);
             let (by_hour, writer, barrier, sorted) = (&by_hour, &writer, &barrier, &sorted);
+            let file = &file;
             let next_hour = &next_hour;
             s.spawn(move || {
                 let hours = parse(input, next, registry, records);
@@ -153,14 +155,24 @@ fn main() {
                     let parts = std::mem::take(&mut *by_hour[h].lock().unwrap());
                     let lines = scratch.summarize(parts, &records[h], BASE + h as i64, sorted);
                     let mut w = writer.lock().unwrap();
-                    let w = &mut *w;
                     w.done[h] = Some(lines);
-                    while w.next < HOURS
-                        && let Some(lines) = w.done[w.next].take()
-                    {
-                        w.file.write_all(&lines).expect("write summary.txt");
-                        w.next += 1;
+                    if w.busy {
+                        continue; // the writing thread will find it
                     }
+                    // Write every hour that is next in order, outside the lock, so the
+                    // threads depositing hours meanwhile never wait for a write.
+                    w.busy = true;
+                    loop {
+                        let i = w.next;
+                        let Some(lines) = w.done.get_mut(i).and_then(Option::take) else {
+                            break;
+                        };
+                        w.next += 1;
+                        drop(w);
+                        (&*file).write_all(&lines).expect("write summary.txt");
+                        w = writer.lock().unwrap();
+                    }
+                    w.busy = false;
                 }
             });
         }
