@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 4e4fc09)
+HEAD is now at 4e4fc09 Track C: record starts found ahead, ~4 KB at a time, from quote-parity and LF masks, so records are parsed independently and the core overlaps them; profile for this code
+$ cargo build --release -q
+### A/B track c: base 72540e8 vs head 4e4fc09c225e
+21 runs each, alternating; 2 CPUs, AMD EPYC 9V45 96-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 109.82 | 104.59 | OK |
+| head | 115.22 | 109.85 | OK |
+
+speedup base/head 0.953, 95% CI [0.934, 0.973]: **head SLOWER**
