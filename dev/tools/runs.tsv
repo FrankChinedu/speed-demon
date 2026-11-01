@@ -278,3 +278,7 @@ e542027	a	run-52b88e564fb6	0.0458	24.2	450	30.33	code unchanged from 0abefaf (no
 e542027	b	run-c81b6c9ae51c	0.3365	99.5	866	17.14	
 e542027	c	run-c10022693196	0.0477	13.6	530	26.49	seen-bitset writes queued per thread by shard of countries, applied under one lock per 2048 pairs
 e542027	d	run-961d2e4f493a	0.2103	159.1	507	18.13	
+4c412e0	a	run-ebc3e478610a	0.0408	24.6	450	32.00	percentiles selected upward (x86 A/B 1.019x)
+4c412e0	b	run-98bf45dfe6d4	0.2976	99.7	866	18.22	
+4c412e0	c	run-d8f7e20fd693	0.0531	14.0	530	24.98	text field reader forced inline (x86 A/B 1.039x); board noise: slower than the run before
+4c412e0	d	run-ba6e3da68a9e	0.1997	159.8	507	18.59	
