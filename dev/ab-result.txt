@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD e7c72cb)
+HEAD is now at e7c72cb Track B: query results summarised in bulk once their ten smallest ids are known (a list's sum vectorises; a bitmap word adds its popcount and the sum of its set bit positions from six masked popcounts)
+$ cargo build --release -q
+### A/B track b: base 82c3bb4 vs head e7c72cb
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1000.86 | 997.09 | OK |
+| head | 932.20 | 927.05 | OK |
+
+speedup base/head 1.074, 95% CI [1.071, 1.077]: **head FASTER**
