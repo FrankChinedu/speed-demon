@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD a29740b)
+HEAD is now at a29740b Track B: postings entry (u16 last offset, u16 count) without the tokenizer's prefetch
+$ cargo build --release -q
+### A/B track b: base ae1dbdb vs head a29740b
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 946.23 | 935.07 | OK |
+| head | 935.16 | 929.57 | OK |
+
+speedup base/head 1.012, 95% CI [1.001, 1.015]: **head FASTER**
