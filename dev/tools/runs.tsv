@@ -306,3 +306,7 @@ ff44fa3	a	run-91324ea3d371	0.0370	23.5	502	33.37	one-word endpoint slots, 32 KB 
 ff44fa3	b	run-2ad3ea0e272b	0.3299	99.3	866	17.32	
 ff44fa3	c	run-3f7cbc038582	0.0419	11.2	569	29.12	BOM detected by its first byte, no memcmp call per record (x86 A/B 1.080x)
 ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69	
+851ead2	a	run-81c808a916c7	0.0391	23.6	506	32.38	groups of up to 32 latencies sorted once (x86 A/B 1.010x)
+851ead2	b	run-07f43f7d82d8	0.3097	100.2	866	17.85	
+851ead2	c	run-7c6b51a8a5cc	0.0412	10.6	565	29.66	name hash without the murmur3 finaliser (x86 A/B 1.021x)
+851ead2	d	run-cc36b168b6b0	0.2265	159.5	507	17.46	
