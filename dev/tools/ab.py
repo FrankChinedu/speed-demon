@@ -15,8 +15,8 @@ t, base, head = sys.argv[1], sys.argv[2], sys.argv[3]
 runs = int(sys.argv[4]) if len(sys.argv) > 4 else 15
 harness = sys.argv[5] if len(sys.argv) > 5 else "/tmp/harness"
 repo = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
-gen = {"a": "a_ingest.py", "b": "b_index.py", "c": "c_join.py", "d": "d_traverse.py"}[t]
-out_name = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}[t]
+gen = {"a": "a_ingest.py", "c": "c_join.py"}[t]
+out_name = {"a": "summary.txt", "c": "aggregates.txt"}[t]
 data, work = "/tmp/ab-data", "/tmp/ab-work"
 
 
