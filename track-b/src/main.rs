@@ -81,8 +81,8 @@ struct ChunkIndex<'a> {
     words: usize,
     seen: &'a [(u16, u16)],
     pos: &'a [u32],
-    docs: &'a [u16],
-    bits: &'a [u64],
+    docs: Vec<u16>,
+    bits: Vec<u64>,
 }
 
 const DENSE: u32 = 1 << 31;
@@ -282,8 +282,6 @@ fn main() {
                         seen: vec![(u16::MAX, 0); plan.n_bool + 1],
                         touched: Vec::new(),
                         pos: vec![0; plan.n_bool],
-                        docs: Vec::new(),
-                        bits: Vec::new(),
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
@@ -419,10 +417,6 @@ struct Postings {
     /// Per BOOL term, meaningful only while its count is not 0: where its postings
     /// end in the chunk's list buffer, or DENSE | where its bitmap starts.
     pos: Vec<u32>,
-    /// The chunk's lists and bitmaps, reused from chunk to chunk: freeing them per
-    /// chunk unmapped them, and every unmap stops all cores for a TLB shootdown.
-    docs: Vec<u16>,
-    bits: Vec<u64>,
     shift: u32,
 }
 
@@ -460,13 +454,8 @@ impl Postings {
                 total += c;
             }
         }
-        let (docs, bits) = (&mut self.docs, &mut self.bits);
-        docs.clear();
-        docs.reserve_exact(total as usize);
-        docs.resize(total as usize, 0);
-        bits.clear();
-        bits.reserve_exact(dense * words);
-        bits.resize(dense * words, 0);
+        let mut docs = vec![0u16; total as usize];
+        let mut bits = vec![0u64; dense * words];
         for group in &mut self.groups {
             for &p in group.iter() {
                 let (d, b) = ((p >> 16) as usize, (p & 0xffff) as usize);
@@ -485,8 +474,8 @@ impl Postings {
             words,
             seen: &self.seen,
             pos: &self.pos,
-            docs: &self.docs,
-            bits: &self.bits,
+            docs,
+            bits,
         }
     }
 
