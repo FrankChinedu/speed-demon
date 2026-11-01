@@ -1,3 +1,11 @@
+# Deez-attacher: Speed Demon 2026
+
+Rust, zero dependencies, all four tracks. Each `track-*` folder has a README.md (the design) and a PERF.md (every measured step, with board run IDs, including timing probes and failed experiments).
+
+**Teammates: start with [dev/HANDOFF.md](dev/HANDOFF.md).** It covers setup, the build-verify-push loop, the split of the work into two halves, what has been measured and tried per track, and the freeze checklist.
+
+---
+
 # Speed Demon 2026 starter
 
 A working entry for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Each `track-*` folder holds the organisers' naive Python reference, packaged the way the live board builds and runs it. Use it to check your setup end to end, then replace the reference with your own code.
