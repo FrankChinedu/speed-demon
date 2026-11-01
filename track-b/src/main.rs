@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 
 /// A token that no query uses, or a term that is not in any BOOL query.
@@ -273,15 +273,12 @@ fn main() {
     // Each thread starts at a different query, so threads rarely meet on one summary.
     let shared: Vec<Shared> = bools.iter().map(|_| Shared::default()).collect();
     let next = AtomicUsize::new(0);
-    let partial: Vec<(Vec<u64>, Vec<(u32, u32)>)> = thread::scope(|s| {
+    let partial: Vec<Vec<(u32, u32)>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let (plan, chunks, next, bools, shared) = (&plan, &chunks, &next, &bools, &shared);
                 s.spawn(move || {
                     let start = t * bools.len() / threads;
-                    // This thread's packed count and sum per query: summed at the end,
-                    // so the common update needs no atomic on a shared line.
-                    let mut packed = vec![0u64; bools.len()];
                     let mut matches = Vec::new();
                     let mut acc = Acc::default();
                     let mut ids = Vec::with_capacity(1024);
@@ -338,19 +335,18 @@ fn main() {
                                 }
                                 acc.emit(ci.base, &mut result);
                             }
-                            packed[q] += result.packed;
                             shared[q].add(&result);
                         }
                         postings.reset();
                     }
-                    (packed, matches)
+                    matches
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     // A phrase can match one document at several positions; count the document once.
-    let mut matches: Vec<(u32, u32)> = partial.iter().flat_map(|(_, m)| m).copied().collect();
+    let mut matches: Vec<(u32, u32)> = partial.into_iter().flatten().collect();
     matches.sort_unstable();
     matches.dedup();
     let phrase_docs = |p: usize| {
@@ -373,8 +369,8 @@ fn main() {
     let mut blocks: Vec<(usize, Vec<u8>)> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (plan, next, shared, partial, phrase_docs, nth_bool) =
-                    (&plan, &next, &shared, &partial, &phrase_docs, &nth_bool);
+                let (plan, next, shared, phrase_docs, nth_bool) =
+                    (&plan, &next, &shared, &phrase_docs, &nth_bool);
                 s.spawn(move || {
                     let mut done = Vec::new();
                     loop {
@@ -387,11 +383,7 @@ fn main() {
                             let mut result = Summary::default();
                             match plan.queries[i] {
                                 Query::Phrase(p) => phrase_docs(p).for_each(|d| result.add(d)),
-                                Query::Bool(..) => {
-                                    let q = nth_bool[i];
-                                    result.first = shared[q].get();
-                                    result.packed = partial.iter().map(|(p, _)| p[q]).sum();
-                                }
+                                Query::Bool(..) => result = shared[nth_bool[i]].get(),
                             }
                             result.write(&mut buf);
                         }
@@ -1059,13 +1051,14 @@ fn apply(op: Op, a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     }
 }
 
-/// One BOOL query's ten smallest ids, shared by all threads, which add one chunk's
-/// result at a time (chunks are disjoint; the count and sum are kept per thread, as
-/// one word per query, and summed at the end). They are kept sorted (u32::MAX where unfilled) under a
+/// One BOOL query's summary, shared by all threads, which add one chunk's result at
+/// a time (chunks are disjoint). The packed count and sum take one atomic addition.
+/// The ten smallest ids so far are kept sorted (u32::MAX where unfilled) under a
 /// lock, and `tenth` mirrors the last of them: a chunk whose smallest match is not
 /// below it cannot change them, so the lock is skipped. `tenth` only decreases, so a
 /// stale read can only take the lock needlessly, never miss an update.
 struct Shared {
+    packed: AtomicU64,
     tenth: AtomicU32,
     first: Mutex<[u32; 10]>,
 }
@@ -1073,6 +1066,7 @@ struct Shared {
 impl Default for Shared {
     fn default() -> Self {
         Shared {
+            packed: AtomicU64::new(0),
             tenth: AtomicU32::new(u32::MAX),
             first: Mutex::new([u32::MAX; 10]),
         }
@@ -1085,6 +1079,7 @@ impl Shared {
         if n == 0 {
             return;
         }
+        self.packed.fetch_add(s.packed, Relaxed);
         if s.first[0] < self.tenth.load(Relaxed) {
             let mut first = self.first.lock().unwrap();
             let (a, b) = (*first, &s.first[..n]);
@@ -1100,9 +1095,12 @@ impl Shared {
         }
     }
 
-    /// The ten smallest ids, once every thread has finished.
-    fn get(&self) -> [u32; 10] {
-        *self.first.lock().unwrap()
+    /// The summary, once every thread has finished.
+    fn get(&self) -> Summary {
+        Summary {
+            first: *self.first.lock().unwrap(),
+            packed: self.packed.load(Relaxed),
+        }
     }
 }
 
