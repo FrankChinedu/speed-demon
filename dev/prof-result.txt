@@ -1,0 +1,120 @@
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 5 components
+warn: the missing active toolchain `1.99.1-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+           1300.15 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+             29059      page-faults                                                           
+
+       0.660058392 seconds time elapsed
+
+       1.226360000 seconds user
+       0.075022000 seconds sys
+
+
+           1274.92 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+             29049      page-faults                                                           
+
+       0.661473185 seconds time elapsed
+
+       1.205346000 seconds user
+       0.070902000 seconds sys
+
+
+           1283.25 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+             29314      page-faults                                                           
+
+       0.782171131 seconds time elapsed
+
+       1.200954000 seconds user
+       0.083648000 seconds sys
+
+
+    22.56%  [.] <solution::DistMap>::improve
+    19.42%  [.] <solution::Side>::step
+    16.01%  [.] <solution::Side>::step::{closure#0}
+    12.03%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::main::{closure#7}::{closure#0}, ()>
+     7.95%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<<solution::Adjacency>::build::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, alloc::vec::Vec<u64>)>>
+     7.11%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::parallel<solution::load_graph::{closure#4}>::{closure#0}::{closure#0}, ()>
+     6.12%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::parallel<solution::load_graph::{closure#3}>::{closure#0}::{closure#0}, ()>
+     2.77%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::parallel<solution::load_graph::{closure#6}>::{closure#0}::{closure#0}, ()>
+     0.66%  [.] <solution::Side>::start
+     0.65%  [k] do_user_addr_fault
+     0.56%  [k] kernel_init_pages
+     0.41%  [k] _raw_spin_unlock_irqrestore
+     0.25%  [k] hyperv_flush_tlb_multi
+     0.21%  [k] zap_present_ptes.constprop.0
+     0.20%  [k] do_anonymous_page
+     0.16%  [k] __handle_mm_fault
+     0.16%  [k] __rmqueue_pcplist
+     0.13%  [k] blk_cgroup_congested
+     0.13%  [k] handle_mm_fault
+     0.08%  [k] handle_pte_fault
+     0.07%  [k] get_page_from_freelist
+     0.07%  [k] mas_walk
+     0.07%  [k] lock_vma_under_rcu
+     0.07%  [k] __alloc_frozen_pages_noprof
+     0.06%  [k] __pte_offset_map
+grep: write error: Broken pipe
+grep: write error: Broken pipe
+grep: write error: Broken pipe
+22.33% main.rs:534
+7.27% main.rs:378
+5.87% main.rs:98
+4.10% mod.rs:1038
+2.90% main.rs:102
+2.60% macros.rs:379
+2.46% index.rs:238
+2.42% main.rs:598
+2.27% main.rs:597
+2.25% mod.rs:1032
+2.19% main.rs:591
+1.67% main.rs:596
+1.43% non_null.rs:1663
+1.31% main.rs:0
+1.28% main.rs:374
+1.25% main.rs:145
+1.22% main.rs:151
+1.20% main.rs:566
+1.14% main.rs:307
+1.02% main.rs:281
+0.99% main.rs:533
+0.92% cmp.rs:2409
+0.92% main.rs:376
+0.85% main.rs:384
+0.83% main.rs:460
+0.81% cmp.rs:532
+0.80% main.rs:550
+0.80% range.rs:885
+0.79% main.rs:133
+0.78% main.rs:385
+0.78% main.rs:535
+0.65% uint_macros.rs:2728
+0.63% main.rs:109
+0.62% main.rs:555
+0.61% macros.rs:0
+0.59% do_user_addr_fault+200
+0.54% kernel_init_pages+58
+0.53% main.rs:493
+0.51% main.rs:595
+0.49% main.rs:366
+0.48% main.rs:120
+0.47% main.rs:344
+0.46% index.rs:245
+0.46% main.rs:551
+0.45% mod.rs:3101
