@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 8dc7795)
+HEAD is now at 8dc7795 Track B: bitmaps for terms in more than 1/128 of a chunk's documents
+$ cargo build --release -q
+### A/B track b: base 63c2495 vs head 8dc7795
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 1017.10 | 1002.06 | OK |
+| head | 1029.33 | 1015.73 | OK |
+
+speedup base/head 0.988, 95% CI [0.970, 0.999]: **head SLOWER**
