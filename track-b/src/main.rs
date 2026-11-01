@@ -243,7 +243,7 @@ fn main() {
     let docs = mmap::map(&data.join("docs.txt"));
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
-        .min(12);
+        .min(6); // EXPERIMENT
     // Six chunks per thread. Queries are evaluated per chunk and the index dropped,
     // so smaller chunks mean smaller per-thread buffers but more evaluations (board,
     // with shared summaries: four 0.240 s / 62 MB, six 0.244 s / 47 MB, eight
