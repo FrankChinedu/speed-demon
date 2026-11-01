@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 8c7f960)
+HEAD is now at 8c7f960 Track B: per-thread direct-mapped cache of recent term lookups (2,048 entries, 32 KB)
+$ cargo build --release -q
+### A/B track b: base 21e7521 vs head 8c7f960
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 876.91 | 871.48 | OK |
+| head | 1107.10 | 1100.33 | OK |
+
+speedup base/head 0.792, 95% CI [0.781, 0.799]: **head SLOWER**
