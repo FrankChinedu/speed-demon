@@ -853,7 +853,6 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
         let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
             h = hash(&key_at(text, start, end - start));
-            prefetch(&terms.slots[h as usize & terms.mask]);
         }
         hashes[n] = h;
         n += 1;
