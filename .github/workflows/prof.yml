@@ -9,6 +9,9 @@ jobs:
   prof:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Write access only to commit the result back to the prof/ branch that started it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,9 +19,11 @@ jobs:
           python-version: "3.13"
       - run: sudo apt-get update -q && sudo apt-get install -y -q linux-tools-common linux-tools-$(uname -r) binutils >/dev/null || sudo apt-get install -y -q linux-tools-generic binutils >/dev/null
       - run: git clone --depth 1 https://github.com/hackathon-raptors/speed-demon-2026 /tmp/harness
-      - run: |
+      - shell: bash
+        run: |
+          exec > >(tee /tmp/prof.log) 2>&1
           T=$(python3 -c 'import json;print(json.load(open("dev/prof.json"))["track"])')
-          G=$(python3 -c "print({'a':'a_ingest.py','c':'c_join.py'}['$T'])")
+          G=$(python3 -c "print({'a':'a_ingest.py','b':'b_index.py','c':'c_join.py','d':'d_traverse.py'}['$T'])")
           python3 /tmp/harness/generators/$G --seed 1 --scale full --out /tmp/data
           cat /tmp/data/* > /dev/null
           cd track-$T && CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release -q && cd ..
@@ -31,3 +36,13 @@ jobs:
           $PERF report -i /tmp/p.data --stdio --no-children --sort sym 2>/dev/null | grep -v '^#' | grep -v '^$' | head -25
           $PERF report -i /tmp/p.data --stdio --no-children --sort srcline 2>/dev/null | grep -v '^#' | grep -v '^$' | head -45 > /tmp/hot
           while read pct loc rest; do f=${loc%:*}; l=${loc##*:}; case $f in *track-$T/src/*) printf "%s %s: %s\n" "$pct" "${f##*/}:$l" "$(sed -n "${l}p" track-$T/src/${f##*/src/} | cut -c1-100)";; *) echo "$pct $loc";; esac; done < /tmp/hot
+      # The output is committed back to the prof/ branch, so it can be read with git fetch.
+      - if: always()
+        run: |
+          sleep 1
+          tail -n 120 /tmp/prof.log > dev/prof-result.txt
+          git config user.name "prof-workflow"
+          git config user.email "prof-workflow@users.noreply.github.com"
+          git add dev/prof-result.txt
+          git commit -q -m "prof result"
+          git push origin HEAD:${{ github.ref }}
