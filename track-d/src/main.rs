@@ -2,9 +2,10 @@
 //! 5M-edge directed graph with non-negative u32 weights.
 //!
 //! 1. Parse the edge list in parallel, straight from the map: the first pass counts
-//!    each chunk's edges per bucket of 2,048 nodes, then one pass per direction writes
-//!    every edge into its bucket's range, and each bucket's rows are filled in cache.
-//!    Directions are built one after the other, so only one edge array is ever alive.
+//!    each chunk's edges per bucket of 2,048 nodes, then the second writes every
+//!    out-edge into its bucket's range, and each bucket's rows are filled in
+//!    cache. The in-edges are then read back from the out rows into the same buffer,
+//!    so only one edge array is ever alive.
 //! 2. Layout: node ids are randomly relabelled, so every settled node is a cache miss.
 //!    Each node gets one 16-byte row holding up to four edges of one u32 each, aligned
 //!    so it is never split across cache lines: one miss per node, found by address
@@ -252,9 +253,9 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         .iter()
         .map(|_| Mutex::new([vec![0; buckets], vec![0; buckets]]))
         .collect();
-    for_each_chunk(&chunks, threads, |k, chunk| {
+    parallel(chunks.len(), threads, |k| {
         let [out, into] = &mut *counts[k].lock().unwrap();
-        for_each_line(chunk, |u, v, _| {
+        for_each_line(chunks[k], |u, v, _| {
             out[u as usize >> BUCKET_BITS] += 1;
             into[v as usize >> BUCKET_BITS] += 1;
         });
@@ -275,33 +276,51 @@ fn load_graph(text: &'static [u8], threads: usize) -> Graph {
         starts[buckets] = total;
     }
 
-    // Pass 2, once per direction: each edge goes to its bucket. A chunk writes only
-    // its own ranges, as about a thousand sequential streams instead of random words.
-    // The text is parsed again for the second direction so that only one edge array
-    // (8 bytes per edge) is ever alive: memory, not time, decides this.
-    let m = starts[0][buckets];
-    let [out, into] = [0, 1].map(|dir| {
-        let edges: Vec<AtomicU64> = zeroed(m);
-        for_each_chunk(&chunks, threads, |k, chunk| {
-            let cursor = &mut counts[k].lock().unwrap()[dir];
-            for_each_line(chunk, |u, v, w| {
-                let (t, h) = if dir == 0 { (u, v) } else { (v, u) };
-                let b = t as usize >> BUCKET_BITS;
-                edges[cursor[b]].store((t as u64 & LOCAL) << 53 | (h as u64) << 32 | w as u64, Relaxed);
-                cursor[b] += 1;
-            });
+    // Pass 2: each out-edge goes to the bucket of its tail. A chunk writes only its
+    // own ranges, as about a thousand sequential streams instead of random words.
+    let edges: Vec<AtomicU64> = zeroed(starts[0][buckets]);
+    parallel(chunks.len(), threads, |k| {
+        let cursor = &mut counts[k].lock().unwrap()[0];
+        for_each_line(chunks[k], |u, v, w| {
+            let b = u as usize >> BUCKET_BITS;
+            edges[cursor[b]].store((u as u64 & LOCAL) << 53 | (v as u64) << 32 | w as u64, Relaxed);
+            cursor[b] += 1;
         });
-        Adjacency::build(&edges, &starts[dir], n, threads)
     });
+    let out = Adjacency::build(&edges, &starts[0], n, threads);
+
+    // Pass 3: each in-edge goes to the bucket of its head, read back from the out rows
+    // into the same buffer, so one edge array is ever alive and the text is parsed
+    // only twice. A piece of rows counts its edges per head bucket, reserves its
+    // ranges with one atomic add per bucket, then writes them. The order inside a
+    // bucket then depends on thread timing, which changes the order a node's edges
+    // are relaxed in, never a distance.
+    const PIECE: usize = 16 << BUCKET_BITS;
+    let cursor: Vec<AtomicUsize> = starts[1][..buckets].iter().map(|&s| AtomicUsize::new(s)).collect();
+    parallel(n.div_ceil(PIECE), threads, |p| {
+        let nodes = (p * PIECE) as u32..((p + 1) * PIECE).min(n) as u32;
+        let mut at = vec![0; buckets];
+        for u in nodes.clone() {
+            out.for_each_edge(u, |v, _| at[v as usize >> BUCKET_BITS] += 1);
+        }
+        for (b, a) in at.iter_mut().enumerate().filter(|(_, a)| **a > 0) {
+            *a = cursor[b].fetch_add(*a, Relaxed);
+        }
+        for u in nodes {
+            out.for_each_edge(u, |v, w| {
+                let b = v as usize >> BUCKET_BITS;
+                edges[at[b]].store((v as u64 & LOCAL) << 53 | (u as u64) << 32 | w as u64, Relaxed);
+                at[b] += 1;
+            });
+        }
+    });
+    let into = Adjacency::build(&edges, &starts[1], n, threads);
     Graph { out, into }
 }
 
-/// Runs `f` over the chunks on `threads` scoped threads, handing chunks out dynamically.
-fn for_each_chunk(
-    chunks: &[&'static [u8]],
-    threads: usize,
-    f: impl Fn(usize, &'static [u8]) + Sync,
-) {
+/// Runs `f(0)` to `f(count - 1)` on `threads` scoped threads, handing indices out
+/// dynamically.
+fn parallel(count: usize, threads: usize, f: impl Fn(usize) + Sync) {
     let next = AtomicUsize::new(0);
     thread::scope(|s| {
         for _ in 0..threads {
@@ -309,8 +328,10 @@ fn for_each_chunk(
             s.spawn(move || {
                 loop {
                     let k = next.fetch_add(1, Relaxed);
-                    let Some(&c) = chunks.get(k) else { break };
-                    f(k, c);
+                    if k >= count {
+                        break;
+                    }
+                    f(k);
                 }
             });
         }
