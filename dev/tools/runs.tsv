@@ -413,3 +413,7 @@ ecdc8d2	a	run-141cc11e0268	0.0271	21.7	526	39.34
 ecdc8d2	c	run-bdedccb4b1e8	0.0406	11.3	515	29.96	
 ecdc8d2	d	run-18bbe7ed4ae6	0.1943	127.8	541	19.52	code unchanged from 6753993: 0.1943, best so far
 ecdc8d2	b	run-595ce917a2d1	0.0230	10.5	-	-	TIMING PROBE (fails the hash on purpose): exits after the plan: 23.0 ms of serial start-up (~9% of the run)
+71d9df1	a	run-8b457cace67c	0.0273	22.5	526	38.88	
+71d9df1	b	run-eda3fb3c894d	0.2549	82.2	978	20.10	
+71d9df1	c	run-bf7c593e77af	0.0409	10.9	515	30.05	
+71d9df1	d	run-dd4d91961baa	0.1983	127.1	541	19.34	
