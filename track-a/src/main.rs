@@ -74,8 +74,6 @@ fn main() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    std::fs::write(out.join("summary.txt"), b"").unwrap(); // TIMING PROBE: exit after the parse
-    std::process::exit(0);
 
     let count = registry.count.into_inner() as usize;
     let names: Vec<Vec<u8>> = (registry.names.into_iter().take(count))
@@ -176,11 +174,12 @@ impl Scratch {
         lat.resize(total as usize, 0);
         for p in parts {
             for block in p.blocks {
-                for r in block {
+                for &r in &block {
                     let at = &mut end[(r >> LAT_BITS) as usize];
                     lat[*at as usize] = r & LAT_MASK;
                     *at += 1;
                 }
+                std::mem::forget(block); // MEASUREMENT: what freeing the record blocks costs
             }
             for (e, l) in p.big {
                 let at = &mut end[e as usize];

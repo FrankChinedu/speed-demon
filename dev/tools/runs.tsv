@@ -322,3 +322,7 @@ ff44fa3	d	run-e9dcb15a6314	0.1975	160.0	507	18.69
 257172c	b	run-81976ddab1e0	0.2958	99.7	866	18.28	
 257172c	c	run-1adcc68356e0	0.0409	10.8	603	29.38	FAILED EXPERIMENT: names under 32 bytes hashed by one AVX2 XXH3 step (x86 A/B 1.029x): no visible gain on the box, +38 lines, lower K; reverted
 257172c	d	run-77e2309823bc	0.2130	159.8	507	18.00	
+46626c1	b	run-e361b9da7e74	0.2946	99.8	866	18.31	
+46626c1	c	run-d0fdac40f096	0.0410	11.0	565	29.56	code of 851ead2 (XXH3 name hash reverted)
+46626c1	d	run-a9db004aea05	0.1974	159.8	507	18.70	
+46626c1	a	run-a5d1e237911e	0.0199	19.7	-	-	TIMING PROBE (fails the hash on purpose): exits after the parse with the shared endpoint table: 19.9 ms (28.5 before), so phase 2 is now ~13 ms
