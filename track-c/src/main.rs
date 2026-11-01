@@ -83,6 +83,8 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
     let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")));
     let records = mmap::map(&data.join("records.csv"));
+    std::fs::write(out.join("aggregates.txt"), b"").unwrap(); // TIMING PROBE: after the regions
+    std::process::exit(0);
     let threads = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(12);

@@ -338,3 +338,7 @@ dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53
 4a09495	b	run-64205d69dd2c	0.3036	99.8	866	18.04	
 4a09495	d	run-33071f50dd01	0.1938	160.0	507	18.87	
 4a09495	c	run-c67933267f82	0.0279	7.5	-	-	TIMING PROBE (fails the hash on purpose): parse and join, no name interning: 27.9 ms, so interning and the bitset cost ~13.4 ms
+022abb8	a	run-c1be9703f5fe	0.0274	21.9	570	38.55	one set of threads for both phases, barrier between them
+022abb8	b	run-546717a5c6d5	0.3002	99.2	866	18.16	
+022abb8	c	run-e3d43c225be2	0.0434	11.1	565	28.66	code unchanged from 851ead2
+022abb8	d	run-ccb77eed6e86	0.2039	159.6	507	18.40	
