@@ -469,3 +469,7 @@ bea6fc6	d	run-fe4f72d93974	0.2503	128.0	541	17.19	code unchanged from 6753993 (0
 13d1b99	b	run-246ec4cb0362	0.2435	47.4	1007	22.85	EXPERIMENT (pushed as d96fdfe): six chunks per thread with shared summaries: T 0.2435, M 47.4, K 22.85, best so far
 13d1b99	c	run-bdce264e760f	0.0403	10.5	529	30.35	code unchanged from 48a2c66
 13d1b99	d	run-4ef5d786c54e	0.2249	122.1	541	18.31	code unchanged from 6753993
+980f7e2	a	run-b510268bccc1	0.0272	21.5	522	39.38	
+980f7e2	b	run-2e066b2c521a	0.2400	61.6	1007	21.84	EXPERIMENT: four chunks per thread with shared summaries: T 0.2400, M 61.6, K 21.84; back to six
+980f7e2	c	run-b1e0fc4502ad	0.0397	11.3	529	30.13	
+980f7e2	d	run-113ff5d76f41	0.2027	125.6	541	19.18	code unchanged from 6753993
