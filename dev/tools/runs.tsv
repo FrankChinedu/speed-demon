@@ -509,3 +509,11 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 99ef432	b	run-8a587ccf5560	0.2453	45.2	1012	22.97	EXPERIMENT: shared summaries aligned to one cache line each: 0.2453, M 45.2: within noise of 0.2429; reverted
 99ef432	c	run-0dda2658cd80	0.0439	11.0	529	28.83	
 99ef432	d	run-03ee74d53a4e	0.2076	127.0	541	18.91	code unchanged from 6753993
+658ebc5	a	run-2cd581f452bc	0.0268	22.0	522	39.50	
+658ebc5	c	run-e252c26ecdd5	0.0415	11.1	529	29.64	
+658ebc5	d	run-e5a959697d0f	0.2078	127.3	541	18.89	code unchanged from 6753993
+658ebc5	b	run-416c9b2f02ff	0.0181	8.2	-	-	TIMING PROBE (fails the hash on purpose): exits after parsing the queries and filling the term table: 18.1 ms of the plan's 23.0
+c2b0f70	a	run-d72a587796bb	0.0265	21.9	522	39.74	
+c2b0f70	b	run-95827e1ba6a8	0.2392	43.4	1003	23.42	plan stores BOOL and phrase terms in one array each, term table presized (x86 A/B 1.013x): 0.2392, M 43.4, K 23.42, best so far
+c2b0f70	c	run-994b336bb560	0.0398	10.9	529	30.36	
+c2b0f70	d	run-94f5b57c6fa8	0.2008	126.7	541	19.23	code unchanged from 6753993
