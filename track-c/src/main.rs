@@ -255,20 +255,25 @@ fn load_regions(text: &'static [u8]) -> (Vec<&'static [u8]>, Regions) {
 fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
     let mut bounds = vec![0];
     for k in 1..n {
-        let mut p = data.len() * k / n;
-        let end = loop {
-            match data[p..].iter().position(|&b| b == b'\n') {
-                None => break data.len(),
-                Some(i) => p += i + 1,
-            }
-            if data.get(p).is_some_and(|b| b.is_ascii_digit()) || data[p..].starts_with(BOM) {
-                break p;
-            }
-        };
+        let end = next_record(data, data.len() * k / n);
         bounds.push(end.max(*bounds.last().unwrap()));
     }
     bounds.push(data.len());
     bounds.windows(2).map(|w| &data[w[0]..w[1]]).collect()
+}
+
+/// The start of the first record after the first newline at or after `p` (or the end):
+/// a newline followed by a digit or a BOM, which is always a record boundary.
+fn next_record(data: &[u8], mut p: usize) -> usize {
+    loop {
+        match data[p..].iter().position(|&b| b == b'\n') {
+            None => return data.len(),
+            Some(i) => p += i + 1,
+        }
+        if data.get(p).is_some_and(|b| b.is_ascii_digit()) || data[p..].starts_with(BOM) {
+            return p;
+        }
+    }
 }
 
 /// Parses whole records (section 2.1 of the spec) and aggregates them.
@@ -341,17 +346,21 @@ fn parse(
             .position(|&b| b == b'\n')
             .map_or(c.len(), |i| i + 1);
     }
-    while p < c.len() {
+    // Each record is one long chain of dependent field scans, so two are parsed at a
+    // time, one from each half of the chunk, and the core overlaps the two chains.
+    let mid = next_record(c, p.max(c.len() / 2));
+    let mut q = mid;
+    let mut record = |p: &mut usize| {
         // Every byte but a BOM's is ASCII (spec 2.2), so 0xEF at a record start is one.
-        if c[p] == BOM[0] {
-            p += 3;
+        if c[*p] == BOM[0] {
+            *p += 3;
         }
-        let (id, next) = digits(c, p);
+        let (id, next) = digits(c, *p);
         let name = field(c, next + 1);
         let note = field(c, name.end + 1);
         let (region_id, next) = digits(c, note.end + 1);
         let (cents, next) = amount(c, next + 1);
-        p = next
+        *p = next
             + match c.get(next) {
                 Some(b'\r') => 2,
                 Some(_) => 1,
@@ -374,6 +383,16 @@ fn parse(
             intern(c, &batch, names, seen, queues);
             n = 0;
         }
+    };
+    while p < mid && q < c.len() {
+        record(&mut p);
+        record(&mut q);
+    }
+    while p < mid {
+        record(&mut p);
+    }
+    while q < c.len() {
+        record(&mut q);
     }
     intern(c, &batch[..n], names, seen, queues);
 }
