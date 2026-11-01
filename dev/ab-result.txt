@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD 934fc6e)
+HEAD is now at 934fc6e Track B: each 64-byte block's token mask is walked as soon as it is made (no mask buffer), and token hashes go into a buffer sized once per document and written by index (the x86 profile put ~15% of the run in Vec push and extend paths)
+$ cargo build --release -q
+### A/B track b: base 1a58518 vs head 934fc6e
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 943.31 | 926.00 | OK |
+| head | 885.10 | 869.36 | OK |
+
+speedup base/head 1.066, 95% CI [1.053, 1.076]: **head FASTER**
