@@ -501,3 +501,7 @@ d9cdcc7	d	run-267fec9a6a1f	0.2207	127.1	541	18.33	code unchanged from 6753993
 2d30f22	b	run-da2cdc79becd	0.2475	47.7	1020	22.59	chunk lists and bitmaps reused per thread (no unmap per chunk): 0.2475, M 47.7: no gain, reverted
 2d30f22	c	run-04a8d92286b7	0.0453	11.1	529	28.30	
 2d30f22	d	run-389e6bcd2ffd	0.2430	127.5	541	17.46	code unchanged from 6753993
+0c5d410	a	run-088dd4639565	0.0303	22.3	522	37.07	
+0c5d410	b	run-17e3636ad8a6	0.3422	40.8	1011	19.55	EXPERIMENT: six threads (one per core): 0.3422, M 40.8: SMT pays (the lookups are latency-bound); back to twelve
+0c5d410	c	run-a9d7072e3b58	0.0414	10.7	529	29.84	
+0c5d410	d	run-36d13a536ceb	0.2594	127.2	541	16.91	code unchanged from 6753993
