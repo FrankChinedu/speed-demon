@@ -1,0 +1,120 @@
+info: syncing channel updates for 1.99.1-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 5 components
+warn: the missing active toolchain `1.99.1-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+           1072.79 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              6806      page-faults                                                           
+
+       0.550855664 seconds time elapsed
+
+       1.061096000 seconds user
+       0.012976000 seconds sys
+
+
+           1060.63 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              6711      page-faults                                                           
+
+       0.589759559 seconds time elapsed
+
+       1.051984000 seconds user
+       0.009961000 seconds sys
+
+
+           1072.45 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              6739      page-faults                                                           
+
+       0.612699693 seconds time elapsed
+
+       1.060769000 seconds user
+       0.012972000 seconds sys
+
+
+    93.61%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::main::{closure#5}::{closure#0}::{closure#0}, alloc::vec::Vec<(u32, u32)>>
+     1.46%  [.] 0x00000000001b2b65
+     0.42%  [.] solution::main
+     0.33%  [.] 0x00000000001bc193
+     0.31%  [.] solution::plan::{closure#0}
+     0.27%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::main::{closure#8}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, alloc::vec::Vec<u8>)>>
+     0.19%  [.] 0x00000000001bc180
+     0.17%  [k] do_anonymous_page
+     0.16%  [.] 0x00000000001bc21b
+     0.15%  [k] _raw_spin_unlock_irqrestore
+     0.14%  [k] do_user_addr_fault
+     0.14%  [.] 0x00000000001bc204
+     0.13%  [.] 0x00000000001bc1b9
+     0.11%  [.] 0x00000000001b2b77
+     0.09%  [.] 0x00000000001bc237
+     0.09%  [.] 0x00000000001bca9c
+     0.08%  [.] 0x00000000001bca87
+     0.07%  [k] zap_present_ptes.constprop.0
+     0.07%  [.] 0x00000000001b2b58
+     0.07%  [.] 0x00000000001b2b6b
+     0.07%  [.] 0x00000000001bc184
+     0.06%  [.] 0x00000000001bc1e8
+     0.05%  [.] 0x00000000001bca8e
+     0.05%  [k] __rmqueue_pcplist
+     0.05%  [.] 0x00000000001b2b5e
+grep: write error: Broken pipe
+grep: write error: Broken pipe
+6.98% main.rs:422
+6.88% main.rs:752
+5.96% mod.rs:0
+4.83% sse.rs:1946
+4.54% main.rs:755
+4.06% index.rs:238
+4.00% main.rs:0
+2.99% main.rs:306
+2.50% main.rs:302
+2.19% set_len_on_drop.rs:19
+2.02% macros.rs:180
+1.94% uint_macros.rs:2728
+1.92% main.rs:946
+1.91% mod.rs:1032
+1.86% non_null.rs:1663
+1.70% main.rs:842
+1.65% mod.rs:1038
+1.62% main.rs:843
+1.46% libc.so.6[1b2b65]
+1.36% avx2.rs:2163
+1.21% macros.rs:274
+1.18% main.rs:751
+1.16% main.rs:971
+1.11% main.rs:740
+1.07% index.rs:245
+1.05% main.rs:231
+1.01% main.rs:458
+0.94% main.rs:889
+0.91% main.rs:463
+0.79% non_null.rs:627
+0.69% mod.rs:1865
+0.67% uint_macros.rs:85
+0.67% main.rs:1079
+0.66% macros.rs:279
+0.63% hint.rs:879
+0.63% main.rs:935
+0.63% main.rs:423
+0.62% main.rs:461
+0.61% main.rs:124
+0.61% main.rs:230
+0.59% macros.rs:0
+0.57% mod.rs:2635
+0.55% main.rs:421
+0.50% enumerate.rs:120
+0.50% main.rs:1038
