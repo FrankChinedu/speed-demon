@@ -712,8 +712,9 @@ impl Terms {
     /// The id of `key`, adding it if it is new. Grows at 60% full.
     fn insert(&mut self, key: Key) -> u32 {
         let h = hash(&key);
-        if let Some(i) = self.find(h) {
-            return self.slots[i].id;
+        let i = self.find(h);
+        if i != NONE {
+            return self.slots[i as usize].id;
         }
         if (self.count as usize + 1) * 5 > self.slots.len() * 3 {
             let old = std::mem::replace(self, Terms::with_capacity(self.slots.len() * 2));
@@ -739,16 +740,21 @@ impl Terms {
         self.slots[i] = slot;
     }
 
-    /// The slot index of the term with hash `h`, if it is a query term.
+    /// The slot index of the term with hash `h`, or NONE if it is not a query term.
+    /// Most corpus tokens are query terms found at their first slot, so that test
+    /// comes first.
     #[inline]
-    fn find(&self, h: u64) -> Option<usize> {
+    fn find(&self, h: u64) -> u32 {
         let mut i = h as usize & self.mask;
         loop {
-            match self.slots[i].hash {
-                0 => return None,
-                x if x == h => return Some(i),
-                _ => i = (i + 1) & self.mask,
+            let x = self.slots[i].hash;
+            if x == h {
+                return i as u32;
             }
+            if x == 0 {
+                return NONE;
+            }
+            i = (i + 1) & self.mask;
         }
     }
 }
@@ -768,8 +774,9 @@ fn hash(k: &Key) -> u64 {
 /// Fills `slots` with the term-table slot (or NONE) of every token of `text`, in order.
 ///
 /// A token is a maximal run of `[A-Za-z0-9]`. First every byte is classified into a
-/// bitmask (64 bytes per word), then tokens are walked with trailing-zero counts, so
-/// the only unpredictable branch is once per token rather than once per byte.
+/// bitmask (64 bytes per word). XOR-ing each word with itself shifted by one bit then
+/// sets a bit at every token boundary, starts and ends alternating, so tokens are
+/// walked boundary by boundary with trailing-zero counts and no per-byte branch.
 ///
 /// The term table does not fit in L2, so the lookups for a whole document go in
 /// stages: hash and slot prefetch for every token, then the probes. The misses of
@@ -777,21 +784,38 @@ fn hash(k: &Key) -> u64 {
 fn tokenize(text: &[u8], terms: &Terms, scratch: &mut Scratch, slots: &mut Vec<u32>) {
     token_mask(text, &mut scratch.mask);
     scratch.hashes.clear();
-    let mut i = 0;
-    while let Some(start) = next_bit(&scratch.mask, i, 0) {
-        let end = next_bit(&scratch.mask, start, !0).unwrap_or(text.len());
+    let mut token = |start: usize, end: usize| {
         let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
             h = hash(&key_at(text, start, end - start));
             prefetch(&terms.slots[h as usize & terms.mask]);
         }
         scratch.hashes.push(h);
-        i = end;
+    };
+    // `carry` is the last bit of the previous word; `start` is where the open token
+    // began, or usize::MAX between tokens.
+    let (mut carry, mut start) = (0, usize::MAX);
+    for (w, &m) in scratch.mask.iter().enumerate() {
+        let mut edges = m ^ (m << 1 | carry);
+        carry = m >> 63;
+        while edges != 0 {
+            let p = w * 64 + edges.trailing_zeros() as usize;
+            edges &= edges - 1;
+            if start == usize::MAX {
+                start = p;
+            } else {
+                token(start, p);
+                start = usize::MAX;
+            }
+        }
+    }
+    if start != usize::MAX {
+        token(start, text.len());
     }
     slots.clear();
     slots.extend(scratch.hashes.iter().map(|&h| match h {
         0 => NONE,
-        h => terms.find(h).map_or(NONE, |i| i as u32),
+        h => terms.find(h),
     }));
 }
 
@@ -813,19 +837,6 @@ fn prefetch<T>(r: &T) {
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = r;
-}
-
-/// The first position at or after `i` whose mask bit is set (`flip == 0`) or clear
-/// (`flip == !0`). Bits past the text are clear.
-#[inline]
-fn next_bit(mask: &[u64], i: usize, flip: u64) -> Option<usize> {
-    let mut w = i / 64;
-    let mut m = (*mask.get(w)? ^ flip) & (!0u64 << (i % 64));
-    while m == 0 {
-        w += 1;
-        m = *mask.get(w)? ^ flip;
-    }
-    Some(w * 64 + m.trailing_zeros() as usize)
 }
 
 /// The lowercased, zero-padded key of the token `text[start..start + len]`. OR-ing
