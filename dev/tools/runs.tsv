@@ -250,7 +250,11 @@ e041e16	d	run-3a6aa3b59fac	0.2114	160.0	507	18.06
 211cbe9	b	run-d656ae5d9a66	0.2981	99.5	866	18.22	
 211cbe9	c	run-bacaf708ef1b	0.0579	11.0	493	25.37	
 211cbe9	d	run-9fa264c73350	0.1977	160.0	507	18.68	
-8c6f070	a	run-ca8f39816221	0.0394	24.5	450	32.59	
+8c6f070	a	run-ca8f39816221	0.0394	24.5	450	32.59	folded-multiply hash step (correctness: FxHash collided on near-duplicate names): no time change
 8c6f070	b	run-b26ea2b38719	0.3018	99.4	866	18.11	
-8c6f070	c	run-cbd75f941041	0.0588	11.2	494	25.09	
+8c6f070	c	run-cbd75f941041	0.0588	11.2	494	25.09	folded-multiply hash step (correctness: FxHash collided on near-duplicate names): no time change
 8c6f070	d	run-7035e5dd7df5	0.2105	159.5	507	18.11	
+1abd716	a	run-5c0459801eb9	0.0410	23.7	450	32.16	code unchanged from 8c6f070
+1abd716	b	run-e0bc6961e115	0.2967	99.3	866	18.27	
+1abd716	c	run-7bcd424bccf7	0.0578	11.9	513	24.86	FAILED EXPERIMENT: region join batched with the name lookups (region slot prefetched): within noise, +19 lines; reverted
+1abd716	d	run-30cadb135899	0.1948	159.7	507	18.82	
