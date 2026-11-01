@@ -1,0 +1,12 @@
+Preparing worktree (detached HEAD ccefbf8)
+HEAD is now at ccefbf8 Track B: a query whose running result is an empty list skips the lookups of its AND and NOT terms
+$ cargo build --release -q
+### A/B track b: base 1b38a46 vs head ccefbf8
+15 runs each, alternating; 2 CPUs, AMD EPYC 7763 64-Core Processor
+
+| | median (ms) | min (ms) | output hash |
+|---|---|---|---|
+| base | 902.98 | 878.57 | OK |
+| head | 904.21 | 878.01 | OK |
+
+speedup base/head 0.999, 95% CI [0.977, 1.010]: **no clear difference**
