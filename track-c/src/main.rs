@@ -368,7 +368,12 @@ fn parse(
         a.name_bytes += (name.len() - name.escapes) as u64;
         a.note_bytes += (note.len() - note.escapes) as u64;
 
-        std::hint::black_box((g, name.start, name.end_content)); // TIMING PROBE: no interning
+        batch[n] = (g, name.start, name.end_content);
+        n += 1;
+        if n == BATCH {
+            intern(c, &batch, names, seen, queues);
+            n = 0;
+        }
     }
     intern(c, &batch[..n], names, seen, queues);
 }

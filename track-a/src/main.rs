@@ -20,7 +20,7 @@ use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Barrier, Mutex, OnceLock};
 use std::thread;
 
 /// Every timestamp is in the 72 hours from 2026-10-30T18:00Z (spec section 2).
@@ -113,44 +113,45 @@ fn main() {
     let records: Vec<Records> = (0..HOURS)
         .map(|_| Records::new(len / 39 + (threads + 1) * BLOCK))
         .collect();
-    let parts: Vec<Vec<Hour>> = thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let (input, next, registry, records) = (&input, &next, &registry, &records);
-                s.spawn(move || parse(input, len, next, base, registry, records))
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-
-    let count = registry.count.into_inner() as usize;
-    let names: Vec<Vec<u8>> = (registry.names.into_iter().take(count))
-        .map(|n| n.into_inner().unwrap())
-        .collect();
-    // Endpoint ids in bytewise name order, which is exactly the spec's order.
-    let mut order: Vec<usize> = (0..names.len()).collect();
-    order.sort_unstable_by(|&a, &b| names[a].cmp(&names[b]));
-
-    let mut by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
-    for part in parts {
-        for (slot, hour) in by_hour.iter_mut().zip(part) {
-            slot.get_mut().unwrap().push(hour);
-        }
-    }
+    let by_hour: Vec<Mutex<Vec<Hour>>> = (0..HOURS).map(|_| Mutex::default()).collect();
     let writer = Mutex::new(Writer {
         next: 0,
         done: vec![None; HOURS],
         file: File::create(out.join("summary.txt")).expect("create summary.txt"),
     });
-    let next = AtomicUsize::new(0);
+    // One set of threads for both phases: starting a second set, and each thread's
+    // exit unmapping its stack (a TLB shootdown on every core), costs more than the
+    // barrier between the phases.
+    let barrier = Barrier::new(threads);
+    let sorted: OnceLock<(Vec<&[u8]>, Vec<usize>)> = OnceLock::new();
+    let next_hour = AtomicUsize::new(0);
     thread::scope(|s| {
         for _ in 0..threads {
-            let (names, order, by_hour, writer, next) = (&names, &order, &by_hour, &writer, &next);
-            let records = &records;
+            let (input, next, registry, records) = (&input, &next, &registry, &records);
+            let (by_hour, writer, barrier, sorted) = (&by_hour, &writer, &barrier, &sorted);
+            let next_hour = &next_hour;
             s.spawn(move || {
+                for (slot, hour) in by_hour
+                    .iter()
+                    .zip(parse(input, len, next, base, registry, records))
+                {
+                    slot.lock().unwrap().push(hour);
+                }
+                if barrier.wait().is_leader() {
+                    let count = registry.count.load(Relaxed) as usize;
+                    let names: Vec<&[u8]> = (registry.names[..count].iter())
+                        .map(|n| n.get().unwrap().as_slice())
+                        .collect();
+                    // Endpoint ids in bytewise name order, which is exactly the spec's order.
+                    let mut order: Vec<usize> = (0..count).collect();
+                    order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
+                    sorted.set((names, order)).unwrap();
+                }
+                barrier.wait();
+                let (names, order) = sorted.get().unwrap();
                 let mut scratch = Scratch::new(names.len());
                 loop {
-                    let h = next.fetch_add(1, Relaxed);
+                    let h = next_hour.fetch_add(1, Relaxed);
                     if h >= HOURS {
                         break;
                     }
@@ -196,7 +197,7 @@ impl Scratch {
         parts: Vec<Hour>,
         records: &Records,
         prefix: [u8; 21],
-        names: &[Vec<u8>],
+        names: &[&[u8]],
         order: &[usize],
     ) -> Vec<u8> {
         let (count, errors, end) = (&mut self.count, &mut self.errors, &mut self.end);
@@ -251,7 +252,7 @@ impl Scratch {
             let hi = end[e] as usize;
             let [p50, p95, p99] = percentiles(&mut lat[hi - n as usize..hi]);
             out.extend_from_slice(&prefix);
-            out.extend_from_slice(&names[e]);
+            out.extend_from_slice(names[e]);
             let errs = errors[e] as u64;
             for v in [
                 n as u64,
