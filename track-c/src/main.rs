@@ -95,7 +95,8 @@ fn main() {
     let seen = Seen {
         bits: &bits,
         locks: &locks,
-        per_shard: groups.div_ceil(SHARDS),
+        // Shards of a power of two of countries, so a pair finds its shard by a shift.
+        shard_shift: groups.div_ceil(SHARDS).next_power_of_two().trailing_zeros(),
         overflow: &overflow,
     };
     // Many chunks handed out on demand, so a slow core never holds up the rest.
@@ -283,7 +284,7 @@ fn split_records(data: &'static [u8], n: usize) -> Vec<&'static [u8]> {
 struct Seen<'a> {
     bits: &'a [AtomicU64],
     locks: &'a [Mutex<()>],
-    per_shard: usize, // countries per shard
+    shard_shift: u32, // a country's shard is its index shifted right by this
     overflow: &'a Mutex<Vec<(usize, u32)>>,
 }
 
@@ -297,7 +298,7 @@ impl Seen<'_> {
     #[inline]
     fn insert(&self, queues: &mut [Vec<u32>], g: usize, id: u32) {
         if (id as usize) < MAX_IDS {
-            let s = g / self.per_shard;
+            let s = g >> self.shard_shift;
             queues[s].push((g as u32) << MAX_IDS.trailing_zeros() | id);
             if queues[s].len() == QUEUE {
                 self.apply(s, &mut queues[s]);
