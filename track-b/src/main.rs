@@ -249,13 +249,25 @@ fn main() {
     // with shared summaries: four 0.240 s / 62 MB, six 0.244 s / 47 MB, eight
     // 0.267 s / 41 MB). About 3.5 MB and 3,500 documents each at full scale, well
     // inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 8).max(docs.len() >> 23));
+    let chunks = split_lines(docs, (threads * 6).max(docs.len() >> 23));
 
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
         .filter_map(|q| match q {
             Query::Bool(first, rest) => Some((*first, &rest[..])),
             Query::Phrase(_) => None,
+        })
+        .collect();
+    // For each, a term every match must contain, or NONE: left to right, the result
+    // stays inside the first term's set until an OR, and inside the set of an AND
+    // term met after it. In a chunk where that term is absent the query is skipped.
+    let required: Vec<u32> = (bools.iter())
+        .map(|&(first, rest)| {
+            rest.iter().fold(first, |req, &(op, t)| match op {
+                Op::Or => NONE,
+                Op::And if req == NONE => t,
+                _ => req,
+            })
         })
         .collect();
 
@@ -268,7 +280,8 @@ fn main() {
     let partial: Vec<Vec<(u32, u32)>> = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
-                let (plan, chunks, next, bools, shared) = (&plan, &chunks, &next, &bools, &shared);
+                let (plan, chunks, next, bools, shared, required) =
+                    (&plan, &chunks, &next, &bools, &shared, &required);
                 s.spawn(move || {
                     let start = t * bools.len() / threads;
                     let mut matches = Vec::new();
@@ -316,6 +329,10 @@ fn main() {
                         let ci = postings.index(base.unwrap_or(0), n_docs);
                         for k in 0..bools.len() {
                             let q = (k + start) % bools.len();
+                            let r = required[q];
+                            if r != NONE && ci.seen[r as usize].1 == 0 {
+                                continue;
+                            }
                             let (first, rest) = bools[q];
                             let mut result = Summary::default();
                             if rest.is_empty() {
