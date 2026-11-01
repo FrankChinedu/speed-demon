@@ -409,3 +409,7 @@ ae1dbdb	d	run-28d381916cb6	0.1965	124.8	541	19.50	code unchanged from 6753993: 0
 5b22af8	b	run-4008000a794b	0.2515	80.5	975	20.32	token mask walked as made (no mask buffer), hashes written by index (x86 A/B 1.066x): 0.2515, best so far
 5b22af8	c	run-3a7f2391411d	0.0443	10.9	515	28.90	
 5b22af8	d	run-fd8b5cd7de79	0.2077	129.2	541	18.84	code unchanged from 6753993
+ecdc8d2	a	run-141cc11e0268	0.0271	21.7	526	39.34	
+ecdc8d2	c	run-bdedccb4b1e8	0.0406	11.3	515	29.96	
+ecdc8d2	d	run-18bbe7ed4ae6	0.1943	127.8	541	19.52	code unchanged from 6753993: 0.1943, best so far
+ecdc8d2	b	run-595ce917a2d1	0.0230	10.5	-	-	TIMING PROBE (fails the hash on purpose): exits after the plan: 23.0 ms of serial start-up (~9% of the run)
