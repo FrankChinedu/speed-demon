@@ -425,3 +425,5 @@ ecdc8d2	b	run-595ce917a2d1	0.0230	10.5	-	-	TIMING PROBE (fails the hash on purpo
 230409a	c	run-49fd768c32b5	0.0407	10.8	515	30.16	
 230409a	d	run-6885eed55869	0.1946	125.2	541	19.58	code unchanged from 6753993: 0.1946
 230409a	b	run-4b61a35a1d87	0.0199	20.5	-	-	TIMING PROBE (fails the hash on purpose, pushed as fb8320f): exits after the parallel plan (0297d50): 19.9 ms against the serial plan's 23.0, +44 lines; the parallel plan dropped
+813b35e	a	run-c72a3775c2a4	0.0278	21.7	526	38.85	
+813b35e	b	run-386ed468924d	0.2392	80.6	975	20.84	

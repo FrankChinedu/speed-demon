@@ -17,8 +17,8 @@ mod mmap;
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::{Mutex, OnceLock};
 use std::thread::{self, available_parallelism};
 
 /// One step of the name hash per 8-byte word: the folded multiply of foldhash and
@@ -79,37 +79,52 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "/data".into()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| "/out".into()));
-    let (codes, region) = load_regions(mmap::map(&data.join("regions.csv")));
+    let regions = mmap::map(&data.join("regions.csv"));
     let records = mmap::map(&data.join("records.csv"));
     let threads = available_parallelism().map_or(1, |n| n.get().min(12));
-    let groups = codes.len() + 1; // the last group is _UNMATCHED
-
     let names = Names::new();
-    let bits = zeroed_atomics(groups * MAX_IDS / 64);
+    // Sized for every possible country (26^3 codes and _UNMATCHED) before regions.csv
+    // says how many there are: rows of countries that do not occur are never touched,
+    // and untouched pages cost nothing.
+    let bits = zeroed_atomics((26 * 26 * 26 + 1) * MAX_IDS / 64);
     let overflow = Mutex::new(Vec::new());
     let locks: Vec<Mutex<()>> = (0..SHARDS).map(|_| Mutex::new(())).collect();
-    let shared = Shared {
-        region: &region,
-        names: &names,
-        bits: &bits,
-        locks: &locks,
-        // Shards of a power of two of countries, so a pair finds its shard by a shift.
-        shard_shift: groups.div_ceil(SHARDS).next_power_of_two().trailing_zeros(),
-        overflow: &overflow,
-    };
+    let setup = OnceLock::new(); // country codes and the region table
     // Many chunks handed out on demand, so a slow core never holds up the rest.
     let chunks = split_records(records, threads * 8);
     let next = AtomicUsize::new(0);
     let aggs = thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let (shared, chunks, next) = (&shared, &chunks, &next);
+            .map(|t| {
+                let (setup, chunks, next) = (&setup, &chunks, &next);
+                let (names, bits, locks, overflow) = (&names, &bits, &locks, &overflow);
                 s.spawn(move || {
+                    // While the main thread reads regions.csv, fault in this thread's
+                    // share of records.csv (the kernel maps 64 KB per fault), so the
+                    // parse later finds those pages mapped.
+                    let share = records.len() * t / threads..records.len() * (t + 1) / threads;
+                    for page in records[share].chunks(1 << 16) {
+                        if setup.get().is_some() {
+                            break;
+                        }
+                        std::hint::black_box(page[0]);
+                    }
+                    let (codes, region): &(Vec<&[u8]>, Regions) = setup.wait();
+                    let groups = codes.len() + 1; // the last group is _UNMATCHED
+                    let shared = Shared {
+                        region,
+                        names,
+                        bits,
+                        locks,
+                        // Shards of a power of two of countries: a pair finds its shard by a shift.
+                        shard_shift: groups.div_ceil(SHARDS).next_power_of_two().trailing_zeros(),
+                        overflow,
+                    };
                     let mut aggs = vec![Agg::EMPTY; groups];
                     let mut queues = vec![Vec::with_capacity(QUEUE); SHARDS];
                     while let Some(&chunk) = chunks.get(next.fetch_add(1, Relaxed)) {
                         let first = std::ptr::eq(chunk, chunks[0]);
-                        parse(chunk, first, shared, &mut aggs, &mut queues);
+                        parse(chunk, first, &shared, &mut aggs, &mut queues);
                     }
                     for (s, queue) in queues.iter_mut().enumerate() {
                         shared.apply(s, queue);
@@ -118,6 +133,8 @@ fn main() {
                 })
             })
             .collect();
+        setup.set(load_regions(regions)).ok();
+        let groups = setup.get().unwrap().0.len() + 1;
         let mut total = vec![Agg::EMPTY; groups];
         for h in handles {
             for (a, o) in total.iter_mut().zip(&h.join().unwrap()) {
@@ -126,6 +143,8 @@ fn main() {
         }
         total
     });
+    let (codes, _) = setup.into_inner().unwrap();
+    let groups = codes.len() + 1;
     let mut overflow = overflow.into_inner().unwrap();
     overflow.sort_unstable();
     overflow.dedup();
