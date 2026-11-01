@@ -248,7 +248,7 @@ fn main() {
     // dropped, smaller chunks mean smaller per-thread buffers (board: 4 per thread
     // 79 MB, 8 per thread 60 MB, 12 per thread slower). About 2.6 MB and 2,600
     // documents each at full scale, well inside the 16-bit offsets.
-    let chunks = split_lines(docs, (threads * 8).max(docs.len() >> 23));
+    let chunks = split_lines(docs, (threads * 6).max(docs.len() >> 23));
 
     // The BOOL queries, numbered in input order.
     let bools: Vec<(u32, &[(Op, u32)])> = (plan.queries.iter())
