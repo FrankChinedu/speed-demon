@@ -1,0 +1,120 @@
+docs=250000 docs_bytes=253827587 queries=50000 queries_bytes=1763534 distinct_tokens=609833 seconds=105.4
+info: syncing channel updates for 1.99.1-x86_64-unknown-linux-gnu
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: downloading 5 components
+warn: the missing active toolchain `1.99.1-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+           1794.23 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              7012      page-faults                                                           
+
+       0.915187905 seconds time elapsed
+
+       1.777099000 seconds user
+       0.018947000 seconds sys
+
+
+           1733.77 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              6976      page-faults                                                           
+
+       0.895495108 seconds time elapsed
+
+       1.708783000 seconds user
+       0.026965000 seconds sys
+
+
+           1736.94 msec task-clock                                                            
+   <not supported>      cycles                                                                
+   <not supported>      instructions                                                          
+   <not supported>      branches                                                              
+   <not supported>      branch-misses                                                         
+   <not supported>      cache-misses                                                          
+              6844      page-faults                                                           
+
+       0.892848237 seconds time elapsed
+
+       1.719584000 seconds user
+       0.018951000 seconds sys
+
+
+    93.67%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::main::{closure#4}::{closure#0}::{closure#0}, (alloc::vec::Vec<solution::Summary>, alloc::vec::Vec<(u32, u32)>)>
+     1.57%  [.] 0x00000000001a2d1d
+     0.39%  [.] solution::main
+     0.35%  [.] solution::plan::{closure#0}
+     0.35%  [.] 0x00000000001a3191
+     0.22%  [.] 0x00000000001a3180
+     0.17%  [k] kernel_init_pages
+     0.15%  [k] do_user_addr_fault
+     0.15%  [.] 0x00000000001a2da5
+     0.15%  [.] solution::push_num
+     0.14%  [.] 0x00000000001a31d9
+     0.13%  [.] std::sys::backtrace::__rust_begin_short_backtrace::<solution::main::{closure#8}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, alloc::vec::Vec<u8>)>>
+     0.13%  [.] 0x00000000001a31e6
+     0.13%  [k] _raw_spin_unlock_irqrestore
+     0.10%  [.] 0x00000000001a2b08
+     0.10%  [.] 0x00000000001a3184
+     0.07%  [.] 0x00000000001a2d23
+     0.06%  [.] 0x00000000001a3205
+     0.06%  [.] 0x00000000001a3c0e
+     0.05%  [k] zap_present_ptes.constprop.0
+     0.05%  [.] 0x00000000001a3c04
+     0.05%  [.] 0x00000000001a3c13
+     0.05%  [.] 0x00000000001a2a20
+     0.05%  [.] 0x00000000001a2dcb
+     0.05%  [.] 0x00000000001a3324
+grep: write error: Broken pipe
+9.09% main.rs:413
+8.62% main.rs:741
+6.98% sse.rs:1946
+4.77% mod.rs:0
+4.52% index.rs:238
+2.98% main.rs:744
+2.77% main.rs:0
+2.67% main.rs:298
+2.67% main.rs:832
+2.28% mod.rs:1032
+2.05% uint_macros.rs:2728
+1.89% uint_macros.rs:178
+1.88% non_null.rs:1663
+1.87% mod.rs:1038
+1.85% main.rs:933
+1.78% main.rs:831
+1.63% main.rs:302
+1.57% libc.so.6[1a2d1d]
+1.27% main.rs:414
+1.23% macros.rs:274
+1.21% index.rs:245
+1.19% main.rs:229
+1.12% main.rs:958
+1.11% main.rs:452
+1.06% macros.rs:180
+0.96% index.rs:0
+0.95% uint_macros.rs:85
+0.86% avx2.rs:2163
+0.84% macros.rs:279
+0.84% mod.rs:328
+0.83% main.rs:856
+0.80% main.rs:858
+0.79% mod.rs:2635
+0.78% main.rs:449
+0.72% main.rs:99
+0.71% mod.rs:2215
+0.68% main.rs:830
+0.66% hint.rs:879
+0.66% main.rs:231
+0.66% non_null.rs:627
+0.60% main.rs:993
+0.56% accum.rs:55
+0.53% mod.rs:1865
+0.52% main.rs:454
+0.49% main.rs:299
