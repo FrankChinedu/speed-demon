@@ -249,12 +249,13 @@ fn main() {
                     let mut matches = Vec::new();
                     let mut acc = Acc::default();
                     let mut ids = Vec::with_capacity(1024);
+                    let mut uniq = Vec::new();
                     let mut scratch = Scratch::default();
                     // The chunk's postings, `doc offset << 16 | BOOL index` (there are at
                     // most 65,536 BOOL terms), split by term range; and each term's count.
                     let mut postings = Postings {
                         groups: vec![Vec::new(); GROUPS],
-                        seen: vec![(NONE, 0); plan.n_bool],
+                        seen: vec![(NONE, 0); plan.n_bool + 1],
                         shift: (plan.n_bool.max(1) - 1)
                             .checked_ilog2()
                             .map_or(0, |b| b + 1)
@@ -270,20 +271,32 @@ fn main() {
                             ids.clear();
                             keys.clear();
                             tokenize(text, &plan.terms, &mut scratch, &mut ids);
-                            // Each token's BOOL posting (once per document) and whether a
+                            // Each token's BOOL term, kept once per document, and whether a
                             // phrase is keyed on it, from its slot; then the slot index
-                            // becomes the term id the phrase check compares.
+                            // becomes the term id the phrase check compares. The first-
+                            // occurrence test is arithmetic, not a branch (it is a coin
+                            // flip per token): every token writes its term to `uniq`, and
+                            // the write position advances only for a BOOL term new to this
+                            // document. Terms in no BOOL query use the spare entry n_bool.
+                            if uniq.len() < ids.len() {
+                                uniq.resize(ids.len(), 0);
+                            }
+                            let mut n = 0;
                             for (i, t) in ids.iter_mut().enumerate().filter(|(_, t)| **t != NONE) {
                                 let s = &plan.terms.slots[*t as usize];
-                                let b = s.info & !KEYED;
+                                let b = (s.info & !KEYED).min(plan.n_bool as u32);
                                 *t = s.id;
-                                if b != NO_BOOL {
-                                    postings.add(doc, offset, b);
-                                }
+                                let seen = &mut postings.seen[b as usize].0;
+                                uniq[n] = b;
+                                n += (*seen != doc && b < plan.n_bool as u32) as usize;
+                                *seen = doc;
                                 if s.info & KEYED != 0 {
                                     let k = &plan.key_first[s.id as usize..];
                                     keys.push((i as u32, k[0], k[1]));
                                 }
+                            }
+                            for &b in &uniq[..n] {
+                                postings.add(offset, b);
                             }
                             match_phrases(plan, &ids, &keys, doc, &mut matches);
                         });
@@ -378,27 +391,25 @@ const GROUPS: usize = 64;
 /// stay in cache, instead of all ~50,000 lists at once.
 struct Postings {
     groups: Vec<Vec<u32>>,
-    /// Per BOOL term: the last document that gave it a posting, and its count in the
-    /// chunk, side by side so a token touches one cache line.
+    /// Per BOOL term: the last document that contained it, and its count in the
+    /// chunk, side by side so a token touches one cache line. One spare entry at the
+    /// end stands for every term that is in no BOOL query.
     seen: Vec<(u32, u32)>,
     shift: u32,
 }
 
 impl Postings {
-    /// Records that document `doc` (at `offset` in the chunk) contains BOOL term `b`.
+    /// Records that the document at `offset` in the chunk contains BOOL term `b`.
     #[inline]
-    fn add(&mut self, doc: u32, offset: u32, b: u32) {
-        let seen = &mut self.seen[b as usize];
-        if seen.0 != doc {
-            *seen = (doc, seen.1 + 1);
-            self.groups[b as usize >> self.shift].push(offset << 16 | b);
-        }
+    fn add(&mut self, offset: u32, b: u32) {
+        self.seen[b as usize].1 += 1;
+        self.groups[b as usize >> self.shift].push(offset << 16 | b);
     }
 
     /// Turns the chunk's postings into its index and empties the buffers. Documents
     /// were visited in order, so every list comes out ascending.
     fn index(&mut self, base: u32, n_docs: usize) -> ChunkIndex {
-        let n_bool = self.seen.len();
+        let n_bool = self.seen.len() - 1;
         let words = n_docs.div_ceil(64);
         // Dense terms (in more than 1/16 of the documents) become bitmaps and get an
         // empty list range.
@@ -407,7 +418,7 @@ impl Postings {
         let mut is_dense = vec![0u64; n_bool.div_ceil(64)];
         let mut slot = vec![u32::MAX; n_bool];
         let mut total = 0;
-        for (b, (_, c)) in self.seen.iter_mut().enumerate() {
+        for (b, (_, c)) in self.seen[..n_bool].iter_mut().enumerate() {
             offsets[b] = total;
             if *c as usize * 16 > n_docs {
                 slot[b] = (dense.len() * words) as u32;
