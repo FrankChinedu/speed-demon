@@ -330,3 +330,7 @@ dd8490a	a	run-46fa46b9dfc3	0.0296	34.7	506	34.48	MEASUREMENT: record blocks leak
 dd8490a	b	run-bb33cdbb0caf	0.2959	99.1	866	18.30	
 dd8490a	c	run-e20a32f76633	0.0422	10.6	565	29.30	FAILED EXPERIMENT: 32 chunks per thread instead of 8: no gain; reverted
 dd8490a	d	run-e5c0d5f8a531	0.2009	160.0	507	18.53	
+6ed2372	a	run-eba9e241931a	0.0282	22.2	570	37.91	each hour's records in one reserved mapping, released with one munmap (was ~860 block frees): 0.0282, M 22.2
+6ed2372	b	run-b625165e9858	0.3282	99.5	866	17.36	
+6ed2372	c	run-5b6a281a3a91	0.0413	11.1	565	29.36	code unchanged from 851ead2
+6ed2372	d	run-617df9a16988	0.2087	159.6	507	18.19	
