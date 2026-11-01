@@ -370,3 +370,11 @@ bc5e6ce	d	run-cf2b18a9d1e3	0.2041	159.7	507	18.39
 41f7f9f	b	run-29b9ce5806c3	0.3187	92.9	871	17.85	16-byte term slots, growth at 60%: table 8 -> 2 MB; M 99 -> 92.9. T inconclusive: the whole box ran ~15% slow this run (A unchanged at 0.0314 vs 0.0273)
 41f7f9f	c	run-2dff3887fd6d	0.0449	11.1	515	28.58	
 41f7f9f	d	run-708452eb3f0e	0.2276	127.0	509	18.22	code unchanged from 9ff61a0 (slow box run, see A)
+86e958d	a	run-e5f86d8098e7	0.0270	22.3	526	39.18	
+86e958d	b	run-b8f1f8347870	0.2821	92.2	876	18.98	queries evaluated chunk by chunk within each block of 256 (on top of the 16-byte slots): 0.2821, best so far
+86e958d	c	run-ca58934021fb	0.0414	10.6	515	30.03	
+86e958d	d	run-65b120e87a0a	0.2035	128.3	521	19.16	glibc mmap threshold pinned at 128 KB and one-word heap entries: M unchanged (128.3), so freed buffers in the arenas were not the cause
+87155c8	b	run-492611e3eeca	0.1538	31.6	-	-	TIMING PROBE (fails the hash on purpose): tokenizing only (mask, hash, lookups) with the 2 MB table: 153.8 ms (168.4 with the 8 MB table in 18cf889)
+87155c8	a	run-60a9f54317bb	0.0273	22.7	526	38.82
+87155c8	c	run-23f73c83ce7e	0.0413	10.8	515	29.93
+87155c8	d	run-10aabc67718c	0.2137	125.4	521	18.78	code unchanged from fe2348f

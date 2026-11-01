@@ -73,13 +73,16 @@ struct Plan {
 /// Posting sets of the BOOL terms for one chunk of documents, as offsets from `base`.
 /// A sparse term is an ascending list, `docs[offsets[b]..offsets[b + 1]]`. A term in
 /// more than 1/16 of the chunk's documents is a bitmap instead (never larger than
-/// its list would be), listed in `dense` by term with its first word in `bits`.
+/// its list would be), listed in `dense` by term with its first word in `bits`, and
+/// marked in `is_dense`, so a term absent from the chunk (most rare terms, in most
+/// chunks) is answered without searching `dense`.
 struct ChunkIndex {
     base: u32,
     words: usize,
     offsets: Vec<u32>,
     docs: Vec<u16>,
     dense: Vec<(u32, u32)>,
+    is_dense: Vec<u64>,
     bits: Vec<u64>,
 }
 
@@ -94,7 +97,7 @@ impl ChunkIndex {
     fn set(&self, b: u32) -> Set<'_> {
         let list =
             &self.docs[self.offsets[b as usize] as usize..self.offsets[b as usize + 1] as usize];
-        if !list.is_empty() {
+        if !list.is_empty() || !has(&self.is_dense, b as usize) {
             return Set::List(list);
         }
         match self.dense.binary_search_by_key(&b, |&(t, _)| t) {
@@ -115,8 +118,9 @@ struct Acc {
 }
 
 #[inline]
-fn has(bits: &[u64], d: u16) -> bool {
-    bits[d as usize / 64] >> (d % 64) & 1 == 1
+fn has(bits: &[u64], d: impl Into<usize>) -> bool {
+    let d = d.into();
+    bits[d / 64] >> (d % 64) & 1 == 1
 }
 
 impl Acc {
@@ -254,8 +258,6 @@ fn main() {
                             ids.clear();
                             keys.clear();
                             tokenize(text, &plan.terms, &mut scratch, &mut ids);
-                            n_docs += std::hint::black_box(ids.len()) & 0; // TIMING PROBE
-                            if std::hint::black_box(true) { return; } // TIMING PROBE
                             // Each token's BOOL posting (once per document) and whether a
                             // phrase is keyed on it, from its slot; then the slot index
                             // becomes the term id the phrase check compares.
@@ -289,8 +291,6 @@ fn main() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    std::fs::write(out.join("results.txt"), b"").unwrap(); // TIMING PROBE
-    std::process::exit(0);
     // Restore document order: chunks are keyed by their first document id.
     indexed.sort_unstable_by_key(|&(first, ..)| first);
     let mut matches: Vec<(u32, u32)> = indexed
@@ -390,6 +390,7 @@ impl Postings {
         // empty list range.
         let mut offsets = vec![0u32; n_bool + 1];
         let mut dense = Vec::new();
+        let mut is_dense = vec![0u64; n_bool.div_ceil(64)];
         let mut slot = vec![u32::MAX; n_bool];
         let mut total = 0;
         for (b, c) in self.count.iter_mut().enumerate() {
@@ -397,6 +398,7 @@ impl Postings {
             if *c as usize * 16 > n_docs {
                 slot[b] = (dense.len() * words) as u32;
                 dense.push((b as u32, slot[b]));
+                is_dense[b / 64] |= 1 << (b % 64);
             } else {
                 total += *c;
             }
@@ -425,6 +427,7 @@ impl Postings {
             offsets,
             docs,
             dense,
+            is_dense,
             bits,
         }
     }
