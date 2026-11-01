@@ -405,3 +405,7 @@ ae1dbdb	d	run-28d381916cb6	0.1965	124.8	541	19.50	code unchanged from 6753993: 0
 1a58518	b	run-776e4ea7b7a4	0.2641	77.8	978	19.96	postings entry (u16 last offset, u16 count), x86 A/B 1.012x: T 0.2641 (board noise), M 82.6 -> 77.8
 1a58518	c	run-efaa1394584b	0.0411	11.3	515	29.75	
 1a58518	d	run-dd6ac00426fb	0.2362	124.8	541	17.78	code unchanged from 6753993: 0.2362 (board noise on D: 0.196-0.241 for this code)
+5b22af8	a	run-06f77ad1d982	0.0272	22.3	526	39.02	
+5b22af8	b	run-4008000a794b	0.2515	80.5	975	20.32	token mask walked as made (no mask buffer), hashes written by index (x86 A/B 1.066x): 0.2515, best so far
+5b22af8	c	run-3a7f2391411d	0.0443	10.9	515	28.90	
+5b22af8	d	run-fd8b5cd7de79	0.2077	129.2	541	18.84	code unchanged from 6753993
