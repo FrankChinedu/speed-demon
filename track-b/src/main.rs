@@ -315,6 +315,11 @@ fn main() {
                             }
                             acc.start(ci.set(first));
                             for &(op, t) in rest {
+                                // An empty list stays empty under AND and NOT: skip
+                                // the term's lookup.
+                                if !acc.is_bits && acc.list.is_empty() && !matches!(op, Op::Or) {
+                                    continue;
+                                }
                                 acc.apply(op, ci.set(t));
                             }
                             acc.emit(ci.base, result);
