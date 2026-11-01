@@ -290,3 +290,7 @@ e542027	d	run-961d2e4f493a	0.2103	159.1	507	18.13
 8cab084	b	run-14c9232a3ae4	0.3082	98.8	866	17.94	
 8cab084	c	run-33d21f3ee9b6	0.0526	14.4	530	24.94	check: sharded bitset alone (code of e542027) is also ~0.053 on the box, so e542027 at 0.0477 was a lucky run
 8cab084	d	run-883885200225	0.2001	160.4	507	18.56	
+fdec699	a	run-cfeccd7afa2e	0.0378	23.9	442	33.50	code unchanged from 0abea93
+fdec699	b	run-dddfce0890ea	0.2946	99.3	866	18.33	
+fdec699	c	run-7c5f12f6cc30	0.0474	11.8	530	27.35	forced-inline field reader; bitset queues of 256 pairs instead of 2048: memory back to 11.8 MB
+fdec699	d	run-2f12c7554728	0.1958	160.0	507	18.77	

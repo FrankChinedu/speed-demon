@@ -15,6 +15,7 @@
 
 mod mmap;
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -398,6 +399,8 @@ struct Names {
 }
 
 const ID_BITS: u32 = 24;
+/// Fresh name ids a thread reserves at a time.
+const ID_BLOCK: u32 = 256;
 const ID_MASK: u64 = (1 << ID_BITS) - 1;
 
 impl Names {
@@ -408,8 +411,8 @@ impl Names {
         }
     }
 
-    /// The hash of the name `c[start..start + len]`: FxHash over its words, then a
-    /// full avalanche (MurmurHash3's finaliser).
+    /// The hash of the name `c[start..start + len]`: the folded multiply over its
+    /// words, then a full avalanche (MurmurHash3's finaliser).
     fn hash(c: &[u8], start: usize, len: usize) -> u64 {
         let mut h =
             (0..len.div_ceil(8)).fold(len as u64, |h, k| mix(h, name_word(c, start, len, k)));
@@ -426,20 +429,38 @@ impl Names {
 
     /// The dense id of the name with hash `h`. A thread that finds an empty slot takes
     /// a fresh id and claims the slot with one compare-exchange; if another thread
-    /// claimed it first, that id is simply never used (bits are only set for ids in
-    /// slots, so a skipped id changes no count).
+    /// claimed it first, the id is kept for the thread's next new name.
+    ///
+    /// Fresh ids come from the thread's own block of ID_BLOCK, reserved from the shared
+    /// counter at once: most of the 100,000 names are first met in the run's first few
+    /// milliseconds, and one shared counter bumped per name makes every thread wait
+    /// for its cache line. Ids reserved but never used only leave unset bits, which
+    /// change no count.
     fn id(&self, h: u64) -> u32 {
+        thread_local! {
+            static RESERVED: Cell<(u32, u32)> = const { Cell::new((0, 0)) }; // next..end
+        }
         let tag = h & !ID_MASK;
         let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
             let slot = &self.slots[i];
             let mut v = slot.load(Acquire);
             if v == 0 {
-                let new = self.next_id.fetch_add(1, Relaxed);
+                let (mut new, mut end) = RESERVED.get();
+                if new == end {
+                    new = self.next_id.fetch_add(ID_BLOCK, Relaxed);
+                    end = new + ID_BLOCK;
+                }
                 assert!((new as u64) < ID_MASK, "too many distinct names");
                 match slot.compare_exchange(0, tag | (new as u64 + 1), AcqRel, Acquire) {
-                    Ok(_) => return new,
-                    Err(found) => v = found,
+                    Ok(_) => {
+                        RESERVED.set((new + 1, end));
+                        return new;
+                    }
+                    Err(found) => {
+                        RESERVED.set((new, end));
+                        v = found;
+                    }
                 }
             }
             if v & !ID_MASK == tag {
