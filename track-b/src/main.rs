@@ -844,20 +844,34 @@ fn hash(k: &Key) -> u64 {
 /// stages: hash and slot prefetch for every token, then the probes. The misses of
 /// one stage overlap instead of each token waiting for its own.
 fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u32>) {
-    token_mask(text, &mut scratch.mask);
-    scratch.hashes.clear();
+    // Tokens are separated, so there are at most len / 2 + 1 of them: the buffer is
+    // sized once and written by index, with no capacity check per token.
+    if scratch.hashes.len() < text.len() / 2 + 1 {
+        scratch.hashes.resize(text.len() / 2 + 1, 0);
+    }
+    let (hashes, mut n) = (&mut scratch.hashes[..], 0);
     let mut token = |start: usize, end: usize| {
         let mut h = 0; // 0: cannot be a query term
         if end - start <= MAX_TERM {
             h = hash(&key_at(text, start, end - start));
             prefetch(&terms.slots[h as usize & terms.mask]);
         }
-        scratch.hashes.push(h);
+        hashes[n] = h;
+        n += 1;
     };
-    // `carry` is the last bit of the previous word; `start` is where the open token
-    // began, or usize::MAX between tokens.
+    // Each block's mask is used as soon as it is made. `carry` is the last bit of the
+    // previous word; `start` is where the open token began, or usize::MAX between
+    // tokens.
+    let blocks = text.chunks_exact(64);
+    let tail = blocks.remainder();
+    let tail = (!tail.is_empty()).then(|| {
+        (tail.iter())
+            .enumerate()
+            .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i)
+    });
+    let masks = blocks.map(|b| block_mask(b.try_into().unwrap())).chain(tail);
     let (mut carry, mut start) = (0, usize::MAX);
-    for (w, &m) in scratch.mask.iter().enumerate() {
+    for (w, m) in masks.enumerate() {
         let mut edges = m ^ (m << 1 | carry);
         carry = m >> 63;
         while edges != 0 {
@@ -875,7 +889,7 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
         token(start, text.len());
     }
     slots.clear();
-    slots.extend(scratch.hashes.iter().map(|&h| match h {
+    slots.extend(scratch.hashes[..n].iter().map(|&h| match h {
         0 => NONE,
         h => terms.find(h),
     }));
@@ -884,7 +898,6 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
 /// Per-thread buffers for `tokenize`.
 #[derive(Default)]
 struct Scratch {
-    mask: Vec<u64>,
     hashes: Vec<u64>,
 }
 
@@ -920,23 +933,6 @@ fn key_at(text: &[u8], start: usize, len: usize) -> Key {
         let keep = u64::from_le_bytes(KEEP[32 - len + 8 * w..][..8].try_into().unwrap());
         (word | 0x2020_2020_2020_2020) & keep
     })
-}
-
-/// One bit per byte of `text`, set for the token bytes `[A-Za-z0-9]`.
-fn token_mask(text: &[u8], mask: &mut Vec<u64>) {
-    mask.clear();
-    let mut blocks = text.chunks_exact(64);
-    for block in &mut blocks {
-        mask.push(block_mask(block.try_into().unwrap()));
-    }
-    let tail = blocks.remainder();
-    if !tail.is_empty() {
-        mask.push(
-            tail.iter()
-                .enumerate()
-                .fold(0, |m, (i, &b)| m | ((CLASS[b as usize] != 0) as u64) << i),
-        );
-    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
