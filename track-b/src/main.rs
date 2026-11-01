@@ -409,7 +409,10 @@ impl Postings {
     /// Records that the document at `offset` in the chunk contains BOOL term `b`.
     #[inline]
     fn add(&mut self, offset: u32, b: u32) {
-        let seen = &mut self.seen[b as usize];
+        debug_assert!((b as usize) < self.seen.len() - 1);
+        // SAFETY: `b` is a BOOL index from the term table, below n_bool, and `seen`
+        // has n_bool + 1 entries.
+        let seen = unsafe { self.seen.get_unchecked_mut(b as usize) };
         if seen.0 != offset as u16 {
             *seen = (offset as u16, seen.1 + 1);
             self.groups[b as usize >> self.shift].push(offset << 16 | b);
@@ -737,7 +740,8 @@ impl Table {
     fn find(&self, h: u64) -> u32 {
         let (tag, mut i) = (Table::tag(h), h as usize & self.mask);
         loop {
-            let e = self.slots[i];
+            // SAFETY: `i` is masked by `mask`, and the table has `mask + 1` slots.
+            let e = unsafe { *self.slots.get_unchecked(i) };
             if e >> INFO_BITS << INFO_BITS == tag {
                 return i as u32;
             }
@@ -855,7 +859,9 @@ fn tokenize(text: &[u8], terms: &Table, scratch: &mut Scratch, slots: &mut Vec<u
             h = hash(&key_at(text, start, end - start));
             prefetch(&terms.slots[h as usize & terms.mask]);
         }
-        hashes[n] = h;
+        // SAFETY: tokens are separated, so a text of `len` bytes has at most
+        // len / 2 + 1 of them, and `hashes` was sized to that above.
+        unsafe { *hashes.get_unchecked_mut(n) = h };
         n += 1;
     };
     // Each block's mask is used as soon as it is made. `carry` is the last bit of the
